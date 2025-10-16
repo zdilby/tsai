@@ -1,0 +1,288 @@
+/* 一些补丁 */
+h3 {
+  all: revert;
+}
+
+/* 整体布局：侧边栏 + 主内容 */
+body {
+    display: flex;
+    min-height: 100vh;
+    margin: 0;
+}
+.max-width-80 {
+    max-width: 166px;
+    overflow: hidden;
+    display: inline-block;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* Materialize 的 sidenav 默认是 absolute 定位，这里强制改为 flex 内部固定布局 */
+/* 侧边栏样式 */ 
+.sidenav.sidenav-fixed {
+    position: relative;
+    height: auto;
+    flex: 0 0 260px; /* 固定宽度 */
+    box-shadow: none; /* 可选，去掉浮动阴影 */
+    border-right: 1px solid #eee; /* 可选，视觉分隔 */
+    overflow: visible; /* 允许内容溢出显示 */
+}
+.sidenav li.active{
+    background-color: #e57373e6;
+}
+.sidenav li>a:hover{
+    cursor: pointer;
+}
+.sidenav li:hover a .badge,
+.sidenav li>a:hover .badge {
+    opacity: 1;
+}
+.sidenav li>a{
+    color: rgba(0, 0, 0, 0.75);
+    font-weight: 400;
+    padding: 0 15px 0 15px;
+}
+.sidenav li.active>a{
+    color: white;
+}
+.sidenav li>a .badge {
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    font-weight: 100;
+    margin-top: 12px;
+    padding-right: 0;
+    font-size: 1em;
+    width: 20px;
+    min-width: 20px;
+}
+.sidenav li>a .fixed-action-btn {
+    position: static !important;
+}
+.sidenav li>a .badge .material-icons{
+    font-weight: 100;
+    vertical-align: middle;
+    font-size: 1.2em;
+    transition: transform 0.3s ease;
+}
+.sidenav li.active>a .badge .material-icons{
+    color: #fff;
+}
+.sidenav li.brand-logo {
+    color: #ee6e73;
+    font-weight: bold;
+    font-size: 1.5rem;
+    border-bottom: 1px solid #eee;
+    height: 64px; /* 对齐 nav 默认移动端高度 */
+    line-height: 64px;
+}
+.sidenav-footer {
+    position: absolute;
+    bottom: 1.5em;
+    left: 0;
+    width: 100%;
+    text-align: center;
+}
+#new-chat-btn {
+    border-radius: 4px;
+    background-color: #e57373e6;
+}
+
+/* FAB 部分 */
+.sidenav>li {
+    position: relative;
+}
+ul.sidenav:not(.browser-default)>li {
+    position: relative;
+}
+.sidenav .fixed-action-btn.direction-right ul {
+    position: absolute;
+    left: calc(100% - 20px);
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 999;
+    margin: 0;
+    padding: 0 24px;
+}
+.sidenav .fixed-action-btn.direction-right ul>li {
+    margin: 0;
+    height: 48px;
+    line-height: 48px;
+}
+.sidenav .fixed-action-btn.direction-right ul>li a{
+    margin: 7px 4px;
+    width: 34px;
+    height: 34px;
+    display: flex;              /* 使用 flex 实现居中 */
+    align-items: center;        /* 垂直居中 */
+    justify-content: center;    /* 水平居中 */
+}
+.sidenav .fixed-action-btn.direction-right ul>li a i.material-icons {
+    float: none !important;     /* 取消浮动 */
+    margin: 0 !important;       /* 去掉默认右边距 */
+    line-height: 1 !important;  /* 避免高度撑开 */
+    width: auto !important;
+    height: auto !important;
+    color: #fff;                /* 保留图标颜色（可按需调整） */
+}
+
+/* 主体内容自适应剩余空间 */
+.main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    overflow: hidden;
+    background: #fff;
+}
+
+/* 顶部导航栏样式 */
+.top-nav {
+    flex-shrink: 0;
+    border-bottom: 1px solid #eee;
+    background-color: white !important;
+    height: 64px !important;
+    line-height: 64px !important;
+}
+.name-logo {
+    color: #ee6e73;
+    font-weight: bold;
+    font-size:1.2rem;
+    padding: 0 16px;
+    height: 64px; /* 对齐 nav 默认移动端高度 */
+    line-height: 64px;
+}
+
+/* 主体内容区域 */
+.chat-container {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 64px); /* 减去导航栏高度 */
+    padding: 0;
+	flex-grow: 1;
+	flex-shrink: 1;
+	font-size: 0.9rem;
+    overflow: hidden;
+}
+
+/* 聊天框 */
+.chat-box {
+	display: flex;
+	flex-direction: column;
+    flex-grow: 1;
+    overflow-y: auto;
+	padding: 1.5em 3em;
+}
+
+/* 消息样式 */
+.message {
+    display: inline-block;
+    margin: 10px 0;
+    padding: 8px 12px;
+    border-radius: 10px;
+    max-width: 70%;
+    word-wrap: break-word;
+    line-height: 1.4;
+}
+
+.user {
+    align-self: flex-end;
+    color: white;
+    background: #26a69a;
+    margin-left: auto;
+}
+.user p {
+    margin-top: 8px;
+    margin-bottom: 8px;
+}
+
+.assistant {
+    align-self: flex-start;
+    color: #333;
+    background: #e5e5ea;
+    margin-right: auto;
+}
+
+/* 输入框固定底部 */
+.input-box {
+    display: flex;
+    justify-content: flex-end;
+    margin: 1.5em 3em;
+    background: #ffffff;
+    z-index: 10;
+}
+#input-form {
+    display: flex;
+    flex: 1;
+}
+#input-form input {
+    flex: 1 1 auto;
+    padding: 10px;
+    border-radius: 5px;
+    border: 1px solid #ccc;
+    margin: 0;
+    height: 1rem;
+}
+#input-box button:hover {
+    cursor: pointer;
+}
+#input-btn,
+#upload-btn {
+    margin-left: 10px;
+    border-radius: 4px;
+}
+#input-form input:focus {
+    outline: none;
+    border-color: #26a69a;
+}
+
+/* 弹出框样式 */
+#table-chat-modal .modal-content .collection{
+    margin-top: 1.8em;
+    margin-bottom: 0;
+}
+#table-chat-modal .modal-content .collection>.collection-item:hover{
+    background-color: #f2f2f206;
+}
+#table-chat-modal .modal-content .collection .collection-item:last-child {
+    border-bottom: 1px solid #e0e0e0;
+}
+.modal .modal-footer .btn-flat:hover {
+    text-decoration: underline;
+}
+#table-chat-modal .modal-content .collection {
+    border-bottom: 0px solid #e0e0e0;
+}
+
+/* 占位符样式 */
+.dots {
+    display: inline-block;
+    animation: blink 1s infinite;
+}
+
+@keyframes blink {
+    0%   { opacity: 0.2; }
+    50%  { opacity: 1; }
+    100% { opacity: 0.2; }
+}
+@font-face {
+    font-family: 'Material Icons';
+    font-style: normal;
+    font-weight: 400;
+    src: url(/static/materialize/flUhRq6tzZclQEJ-Vdg-IuiaDsNcIhQ8tQ.woff2) format('woff2');
+}
+
+.material-icons {
+    font-family: 'Material Icons';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-feature-settings: 'liga';
+    -webkit-font-smoothing: antialiased;
+}

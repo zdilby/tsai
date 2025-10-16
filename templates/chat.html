@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TSAI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+    <meta name="description" content="AI by Tianshu">
+    <link rel="icon" href="/static/images/favicon.png">
+    <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<ul id="slide-out" class="sidenav sidenav-fixed">
+    <li class="brand-logo center">TSAI</li>
+    <div class="sidenav-footer">
+        <button id="new-chat-btn" class="btn waves-effect waves-light modal-trigger" data-target="new-chat-modal">新建对话</button>
+    </div>
+</ul>
+<div class="main">
+    <nav class="white z-depth-0 top-nav">
+      <div class="nav-wrapper">
+        <ul class="right">
+          <li class="name-logo">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="18" height="18" style="vertical-align: middle; margin-right: 6px;fill: #ee6e73;">
+              <path d="M224 256c70.7 0 128-57.3 128-128S294.7 0 224 0 96 57.3 96 128s57.3 128 128 128zm89.6 32h-11.8c-22.2 10.3-46.9 16-73.8 16s-51.6-5.7-73.8-16h-11.8C64.5 288 0   352.5 0 432v16c0 35.3 28.7 64 64 64h320c35.3 0 64-28.7 64-64v-16c0-79.5-64.5-144-134.4-144z"/>
+              </svg>
+              天书
+          </li>
+        </ul>
+      </div>
+    </nav>
+    <div class="chat-container">
+        <div id="chat-box" class="chat-box"></div>
+        <div id="input-box" class="input-box">
+            <form id="input-form">
+                <input type="text" id="message-input" placeholder="Type a message...">
+                <input type="hidden" id="session-id" value="{{ session_id }}">
+            </form>
+            <form id="upload-form" style="display:none;">
+                <input type="file" id="file-input" name="file" accept=".txt,.pdf,.docx">
+            </form>
+            <button class="btn waves-effect waves-light teal lighten-1" id="input-btn">发送</button>
+            {% if session_exists %}
+            <button class="btn waves-effect waves-light teal lighten-1" id="upload-btn">上传</button>
+            {% endif %}
+        </div>
+    </div>
+</div>
+<form id="modal-upload-form" style="display:none;">
+    <input type="file" id="modal-file-input" name="file" accept=".txt,.pdf,.docx">
+    <input type="hidden" id="modal-session-id" value="">
+</form>
+<div id="new-chat-modal" class="modal">
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>新建对话</h5>
+        <div class="input-field">
+            <input id="newchat-name-input" type="text" placeholder="请输入新对话的名称">
+        </div>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="newchat-confirm-btn" class=" waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+<div id="change-chat-modal" class="modal">
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>修改对话名称</h5>
+        <div class="input-field">
+            <input id="changechat-name-input" type="text">
+        </div>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="changechat-confirm-btn" class=" waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+<div id="del-chat-modal" class="modal">
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>删除对话</h5>
+        <p>确定要删除对话 <span id="delchat-name" style="color:red;font-weight: bold;"></span> 吗？此操作不可撤销。</p>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="delchat-confirm-btn" class=" waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+<div id="table-chat-modal" class="modal">
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>对话「<span id="tablechat-name"></span>」引用资料</h5>
+        <ul class="collection" id="collect-modal">
+        </ul>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" id="tablechat-confirm-btn" class=" waves-effect waves-green btn-flat" style="text-decoration: underline;">上传新资料</a>
+    </div>
+</div>
+<script src="/static/js/jquery/jquery-3.6.4.min.js"></script>
+<script src="/static/js/marked/marked.min.js"></script>
+<script src="/static/materialize/js/materialize.min.js"></script>
+<script src="/static/js/base.js"></script>
+<script src="/static/js/chat.js"></script>
+</body>
+</html>

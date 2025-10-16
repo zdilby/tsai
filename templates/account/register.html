@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>登录 TSAI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/login.css">
+</head>
+<body>
+<div class="login-box">
+    <h2 id="form-title">注册</h2>
+    <form id="login-form">
+        <input type="text" id="invite" placeholder="邀请码" required>
+        <input type="text" id="username" placeholder="用户名" required>
+        <input type="password" id="password" placeholder="密码" required>
+        <button type="submit">提交</button>
+    </form>
+</div>
+
+<script src="/static/js/base.js"></script>
+<script>
+const inviteInput = document.getElementById("invite");
+const form = document.getElementById("login-form");
+form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const username = document.getElementById("username").value;
+    const password = document.getElementById("password").value;
+    const invite_code = inviteInput.value;
+
+    try {
+        // 注册
+        const resp = await fetch("/account/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ username, password, invite_code }),
+            credentials: "include"
+        });
+        if (!resp.ok) throw new Error("注册失败");
+        window.location.href = "/";  // 注册成功跳转主页
+    } catch (err) {
+        alert(err.message);
+    }
+});
+</script>
+</body>
+</html>
