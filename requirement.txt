@@ -10,12 +10,12 @@ cachetools==5.5.2
 certifi==2025.8.3
 cffi==2.0.0
 charset-normalizer==3.4.3
-click==8.2.1
+click==8.1.8
 cryptography==45.0.7
 databases==0.9.0
 docx2txt==0.9
 ecdsa==0.19.1
-faiss-cpu==1.12.0
+faiss-cpu==1.9.0
 fastapi==0.116.1
 frozenlist==1.7.0
 google-auth==2.40.3
@@ -28,7 +28,7 @@ Jinja2==3.1.6
 lxml==6.0.1
 MarkupSafe==3.0.2
 multidict==6.6.4
-numpy==2.3.2
+numpy==2.0.2
 packaging==25.0
 passlib==1.7.4
 pdfminer.six==20250506
