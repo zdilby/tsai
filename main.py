@@ -23,7 +23,7 @@ templates = Jinja2Templates(directory="templates")
 @app.on_event("startup")
 async def startup():
     await database.connect()
-    await init_db()
+    # await init_db()
     async with database._backend._pool.acquire() as conn:
         await register_vector(conn)
 
