@@ -51,6 +51,11 @@ async def index(request: Request, session_id: str=Query(None), user = Depends(ge
     return templates.TemplateResponse("chat.html", {"request": request, "session_id": session_id, "session_exists": session_ex, "user": user["username"]})
 
 
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
+
 @app.post("/chat")
 async def chat(session_id: str = Form(...), message: str = Form(...), user = Depends(get_current_user)):
     # 保存用户消息

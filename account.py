@@ -105,18 +105,14 @@ async def get_current_user(request: Request = None):
     token = request.cookies.get("access_token")
     if not token:
         raise HTTPException(status_code=401, detail="无效令牌")
-        # return RedirectResponse("/account/login")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         username: str = payload.get("sub")
         if username is None:
             raise HTTPException(status_code=401, detail="无效令牌")
-            # return RedirectResponse("/account/login")
     except JWTError:
         raise HTTPException(status_code=401, detail="无效令牌")
-        # return RedirectResponse("/account/login")
     user = await get_user(username)
     if user is None:
         raise HTTPException(status_code=401, detail="用户不存在")
-        # return RedirectResponse("/account/login")
     return user
