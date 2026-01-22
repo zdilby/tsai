@@ -3,6 +3,7 @@ import asyncio
 import uuid
 from backend.db import database, init_db, save_message, get_context, add_knowledge, session_exists
 
+
 async def main():
     # 生成邀请码
     code = str(uuid.uuid4())

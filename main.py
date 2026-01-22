@@ -41,7 +41,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request, session_id: str=Query(None), user = Depends(get_current_user)):
+async def index(request: Request, session_id: str = Query(None), user=Depends(get_current_user)):
     if not session_id:
         session_id = str(uuid.uuid4())
         await new_null_session(session_id, user["id"])
@@ -57,7 +57,7 @@ async def ping():
 
 
 @app.post("/chat")
-async def chat(session_id: str = Form(...), message: str = Form(...), user = Depends(get_current_user)):
+async def chat(session_id: str = Form(...), message: str = Form(...), user=Depends(get_current_user)):
     # 保存用户消息
     await save_message(session_id, "user", message)
     # print('message: ', message)
@@ -96,7 +96,7 @@ async def chat(session_id: str = Form(...), message: str = Form(...), user = Dep
 
 
 @app.post("/new_session")
-async def new_session(name: str = Form(None), user = Depends(get_current_user)):
+async def new_session(name: str = Form(None), user=Depends(get_current_user)):
     session_id = str(uuid.uuid4())
     if not name:
         name = "未命名对话"
@@ -109,7 +109,7 @@ async def new_session(name: str = Form(None), user = Depends(get_current_user)):
 
 
 @app.post("/change_session")
-async def change_session(session_id: str = Form(...), name: str = Form(...), user = Depends(get_current_user)):
+async def change_session(session_id: str = Form(...), name: str = Form(...), user=Depends(get_current_user)):
     query = "UPDATE sessions SET name = :name WHERE id = :id AND user_id = :user_id"
     try:
         await database.execute(query, values={"id": session_id, "name": name, "user_id": user["id"]})
@@ -119,7 +119,7 @@ async def change_session(session_id: str = Form(...), name: str = Form(...), use
 
 
 @app.post("/del_session")
-async def del_session(session_id: str = Form(...), user = Depends(get_current_user)):
+async def del_session(session_id: str = Form(...), user=Depends(get_current_user)):
     query = "DELETE FROM sessions WHERE id = :id AND user_id = :user_id"
     try:
         await database.execute(query, values={"id": session_id, "user_id": user["id"]})
@@ -135,21 +135,21 @@ async def new_null_session(session_id: str, user_id: int):
 
 
 @app.get("/sessions")
-async def get_sessions(user = Depends(get_current_user)):
+async def get_sessions(user=Depends(get_current_user)):
     query = "SELECT id, name FROM sessions WHERE user_id = :uid AND name IS NOT NULL ORDER BY created_at DESC"
     rows = await database.fetch_all(query, values={"uid": user["id"]})
     return [{"id": r["id"], "name": r["name"]} for r in rows]
 
 
 @app.get("/messages/{session_id}")
-async def get_messages(session_id: str, limit: int = 50, user = Depends(get_current_user)):
+async def get_messages(session_id: str, limit: int = 50, user=Depends(get_current_user)):
     query = "SELECT role, content FROM messages WHERE session_id = :sid ORDER BY created_at DESC LIMIT :limit"
     rows = await database.fetch_all(query, values={"sid": session_id, "limit": limit})
     return list(reversed([{"role": r["role"], "content": r["content"]} for r in rows]))
 
 
 @app.get("/collections/{session_id}")
-async def get_collections(session_id: str, per_page: int = 500, user = Depends(get_current_user)):
+async def get_collections(session_id: str, per_page: int = 500, user=Depends(get_current_user)):
     query = "SELECT filename, filepath FROM upload_files WHERE session_id = :sid ORDER BY created_at DESC LIMIT :limit"
     rows = await database.fetch_all(query, values={"sid": session_id, "limit": per_page})
     return list(reversed([{"filename": r["filename"], "filepath": r["filepath"]} for r in rows]))

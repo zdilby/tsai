@@ -22,6 +22,7 @@ logging.basicConfig(
     ]
 )
 
+
 class Settings(BaseModel):
     database_url: str = os.getenv("DATABASE_URL")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
@@ -34,6 +35,7 @@ class Settings(BaseModel):
     max_history_turns: int = int(os.getenv("MAX_HISTORY_TURNS", "12"))
     secret_key: str = os.getenv("SECRET_KEY")
     base_dir: Path = BASE_DIR
+
 
 settings = Settings()
 GEMINI_API_KEY = settings.gemini_api_key
