@@ -159,7 +159,7 @@ $(function () {
         try {
             const formData = new FormData(e.target);
             formData.append('session_id', session_id);
-            const res = await fetch("/upload", {method: "POST", body: formData});
+            const res = await fetch("/upload/", {method: "POST", body: formData});
             const result = await res.json();
             alert(result.message);
             // 移除 loading 占位符
@@ -181,7 +181,7 @@ $(function () {
             const formData = new FormData(e.target);
             const modal_session_id = $('#modal-session-id').val();
             formData.append("session_id", modal_session_id);
-            const res = await fetch("/upload", {method: "POST", body: formData});
+            const res = await fetch("/upload/", {method: "POST", body: formData});
             const result = await res.json();
             alert(result.message);
             const $li = $(`
