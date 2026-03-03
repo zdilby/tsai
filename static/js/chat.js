@@ -130,8 +130,15 @@ $(function () {
             });
             const data = await resp.json();
             const renderedAnswer = marked.parse(data.answer);
+            let citationsHtml = '';
+            if (data.citations && data.citations.length > 0) {
+                const citationItems = data.citations.map(c =>
+                    `${escapeHtml(c.source)}（第${c.chunk + 1}段，相关度 ${c.score}）`
+                ).join('、');
+                citationsHtml = `<div class="citations">📎 参考来源：${citationItems}</div>`;
+            }
             // 移除 loading 占位符
-            $('#' + loadingId).replaceWith(`<div class="message assistant">${renderedAnswer}</div>`);
+            $('#' + loadingId).replaceWith(`<div class="message assistant">${renderedAnswer}${citationsHtml}</div>`);
             $chatBox.animate({ scrollTop: $chatBox[0].scrollHeight }, 400);
         } catch (error) {
             console.error("Error:", error);

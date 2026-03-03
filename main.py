@@ -68,8 +68,13 @@ async def chat(session_id: str = Form(...), message: str = Form(...), user=Depen
 
     # RAG 查询
     query_embedding = await get_embedding(client, message)
-    rag_docs = await query_rag(query_embedding, session_id=session_id)
-    rag_text = "\n".join(rag_docs)
+    rag_results = await query_rag(query_embedding, session_id=session_id)
+    rag_text = "\n".join([r["content"] for r in rag_results])
+    rag_citations = [
+        {"source": r["source_file"], "chunk": r["chunk_index"],
+         "score": round(1 - r["distance"], 3)}
+        for r in rag_results if r.get("source_file")
+    ]
 
     # 执行 Google 搜索获取最新网络信息
     web_info = await fetch_from_web(message)
@@ -79,7 +84,13 @@ async def chat(session_id: str = Form(...), message: str = Form(...), user=Depen
             await add_knowledge(web_info, await get_embedding(client, web_info), session_id=session_id)
 
     # 构建提示词 prompt
-    prompt = f"Context:\n{context_text}\n\nRelevant info from RAG:\n{rag_text}\n\nLatest info from web:\n{web_info}\n\nUser: {message}\nAI:"
+    prompt = (
+        f"Context:\n{context_text}\n\n"
+        f"Relevant info from RAG:\n{rag_text}\n\n"
+        f"Latest info from web:\n{web_info}\n\n"
+        f"如果回答参考了上传文档中的内容，请简要注明来自哪个文件。\n"
+        f"User: {message}\nAI:"
+    )
     # print('prompt: ', prompt)
 
     # 设置前置的Grounding with Google Search
@@ -92,7 +103,7 @@ async def chat(session_id: str = Form(...), message: str = Form(...), user=Depen
     answer = resp.text
     # print('answer: ', answer)
     await save_message(session_id, "assistant", answer)
-    return JSONResponse({"answer": answer})
+    return JSONResponse({"answer": answer, "citations": rag_citations})
 
 
 @app.post("/new_session")
