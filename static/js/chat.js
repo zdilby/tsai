@@ -231,6 +231,7 @@ async function loadMessages() {
 
 // 加载引用资料（含处理状态）
 let _collectionsRefreshTimer = null;
+let _collectionsWasPolling = false;  // 本次打开后是否经历过轮询
 
 async function loadCollections(id) {
     if (_collectionsRefreshTimer) {
@@ -286,8 +287,10 @@ async function loadCollections(id) {
         const hasProcessing = statuses.some(s => s.status === 'processing');
         const hasPending    = statuses.some(s => s.status === 'pending');
         if ((hasProcessing || hasPending) && $('#table-chat-modal').hasClass('open')) {
+            _collectionsWasPolling = true;
             _collectionsRefreshTimer = setTimeout(() => loadCollections(id), hasProcessing ? 2000 : 5000);
-        } else if (!hasProcessing && !hasPending && statuses.length > 0 && $('#table-chat-modal').hasClass('open')) {
+        } else if (_collectionsWasPolling && !hasProcessing && !hasPending && statuses.length > 0) {
+            _collectionsWasPolling = false;
             M.toast({ html: '所有文件处理完毕', classes: 'teal' });
         }
     } catch (err) {
@@ -638,6 +641,7 @@ $(function () {
         const aId = $a.attr('id');
         $('#tablechat-name').text(name);
         $('#modal-session-id').val(aId);
+        _collectionsWasPolling = false;
         loadCollections(aId);
         $('#table-chat-modal').modal('open');
     });
