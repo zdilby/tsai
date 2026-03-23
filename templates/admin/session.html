@@ -53,6 +53,23 @@
     <p class="empty-tip">暂无数据</p>
     {% endif %}
 
+    {% if info.system_instruction_origin or info.system_instruction %}
+    <h5 class="section-title" style="margin-top:2em;">机器人性格设定</h5>
+    <table class="striped responsive-table compact-table">
+        <thead><tr><th style="width:160px;">字段</th><th>内容</th></tr></thead>
+        <tbody>
+            <tr>
+                <td style="vertical-align:top;white-space:nowrap;">原始描述</td>
+                <td style="white-space:pre-wrap;">{{ info.system_instruction_origin or '—' }}</td>
+            </tr>
+            <tr>
+                <td style="vertical-align:top;white-space:nowrap;">提取后指令</td>
+                <td style="white-space:pre-wrap;">{{ info.system_instruction or '—' }}</td>
+            </tr>
+        </tbody>
+    </table>
+    {% endif %}
+
     <h5 class="section-title" style="margin-top:2em;">上传文件</h5>
     {% if files %}
     <table class="striped responsive-table compact-table">

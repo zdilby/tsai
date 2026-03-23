@@ -361,6 +361,7 @@ function startStatusPolling(filename, $msgDiv) {
 
 $(function () {
     $('.sidenav').sidenav();
+    M.CharacterCounter.init(document.querySelectorAll('#newchat-persona-input, #changechat-persona-input'));
     // contenteditable 回车提交，方向键导航 dropdown
     $('#message-input').on('keydown', function (e) {
         const ddVisible = $('#mention-dropdown').is(':visible');
@@ -528,6 +529,8 @@ $(function () {
     });
     $('#new-chat-btn').on('click', function() {
         $('#newchat-name-input').val('');
+        $('#newchat-persona-input').val('');
+        M.textareaAutoResize($('#newchat-persona-input')[0]);
     });
     $('#newchat-confirm-btn').on('click', async function () {
         const name = $('#newchat-name-input').val().trim();
@@ -535,13 +538,19 @@ $(function () {
             M.toast({ html: '请输入对话名称', classes: 'red lighten-2' });
             return;
         }
+        const persona = $('#newchat-persona-input').val().trim();
         try {
             const formData = new FormData();
             formData.append("name", name);
             const resp = await authFetch("/new_session", { method: "POST", body: formData});
             const data = await resp.json();
             if(data.success) {
-                $("new-chat-modal").modal('close'); // 关闭模态框
+                if (persona) {
+                    const pForm = new FormData();
+                    pForm.append("session_id", data.id);
+                    pForm.append("persona", persona);
+                    authFetch("/session_persona", { method: "POST", body: pForm }); // fire-and-forget
+                }
                 window.location.href = "/?session_id=" + data.id;
             } else {
                 M.toast({ html: '新建对话失败: ' + (data.error || '未知错误'), classes: 'red lighten-2' });
@@ -551,7 +560,7 @@ $(function () {
             M.toast({ html: '新建对话失败', classes: 'red lighten-2' });
         }
     });
-    $('#changechat-confirm-btn').on('click', async function () {
+    $('#changechat-confirm-btn').on('click', function () {
         const name = $('#changechat-name-input').val().trim();
         const modal_session_id = $('#modal-session-id').val();
         const persona = $('#changechat-persona-input').val().trim();
@@ -559,30 +568,25 @@ $(function () {
             M.toast({ html: '请输入对话名称', classes: 'red lighten-2' });
             return;
         }
-        if (!modal_session_id) {
-            M.toast({ html: '未获取到当前对话ID', classes: 'red lighten-2' });
+        if (persona.length > 500) {
+            M.toast({ html: '性格描述不能超过500字', classes: 'red lighten-2' });
             return;
         }
-        try {
-            const nameForm = new FormData();
-            nameForm.append("name", name);
-            nameForm.append("session_id", modal_session_id);
+        // 立即关闭 modal，更新侧边栏名称
+        $('#change-chat-modal').modal('close');
+        $('#' + modal_session_id + ' .max-width-80').text(name);
+        // fire-and-forget：名称
+        const nameForm = new FormData();
+        nameForm.append("name", name);
+        nameForm.append("session_id", modal_session_id);
+        authFetch("/change_session", { method: "POST", body: nameForm });
+        // fire-and-forget：性格（仅变化时）
+        const originalPersona = $('#changechat-persona-input').data('loaded') || '';
+        if (persona !== originalPersona) {
             const personaForm = new FormData();
             personaForm.append("session_id", modal_session_id);
             personaForm.append("persona", persona);
-            const [nameResp, personaResp] = await Promise.all([
-                authFetch("/change_session", { method: "POST", body: nameForm }),
-                authFetch("/session_persona", { method: "POST", body: personaForm }),
-            ]);
-            const data = await nameResp.json();
-            if (data.success) {
-                window.location.reload(true);
-            } else {
-                M.toast({ html: '修改对话失败: ' + (data.error || '未知错误'), classes: 'red lighten-2' });
-            }
-        } catch (err) {
-            console.error("修改对话失败:", err);
-            M.toast({ html: '修改对话失败', classes: 'red lighten-2' });
+            authFetch("/session_persona", { method: "POST", body: personaForm });
         }
     });
     $('#delchat-confirm-btn').on('click', async function () {
@@ -654,13 +658,14 @@ $(function () {
         $('#modal-session-id').val(aId);
         $('#changechat-name-input').val(name);
         // 加载当前 persona
+        let loadedPersona = '';
         try {
             const resp = await authFetch(`/session_persona/${aId}`);
             const data = await resp.json();
-            $('#changechat-persona-input').val(data.persona || '');
-        } catch (e) {
-            $('#changechat-persona-input').val('');
-        }
+            loadedPersona = data.persona || '';
+        } catch (e) {}
+        $('#changechat-persona-input').val(loadedPersona).data('loaded', loadedPersona);
+        M.textareaAutoResize($('#changechat-persona-input')[0]);
         $('#change-chat-modal').modal('open');
     });
     $('#slide-out').on('click', '.btn-floating.blue', async function (e) {

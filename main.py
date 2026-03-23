@@ -19,7 +19,7 @@ _RECALL_PATTERNS = re.compile(
 )
 from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
-from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens, get_session_persona, update_session_persona
+from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens, get_session_persona, get_session_persona_origin, update_session_persona, save_persona_origin, update_session_instruction
 from backend.rag import get_embedding, query_rag, query_history
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
@@ -230,19 +230,53 @@ async def del_session(session_id: str = Form(...), user=Depends(get_current_user
         return {"success": False, "error": str(e)}
 
 
+_PERSONA_PROCESS_PROMPT = (
+    "你是一个AI助手配置验证器。用户为AI角色提供了以下性格描述：\n\n"
+    "\"\"\"\n{raw}\n\"\"\"\n\n"
+    "任务：判断此内容是否是合理的AI角色性格/风格描述（描述AI的说话方式、专业领域、性格特点等）。\n"
+    "如果是，将其整理为简洁、明确的system instruction（中文，不超过200字）。\n"
+    "如果不是（乱码、无意义内容、与AI性格无关等），只输出空字符串。\n"
+    "只输出整理结果或空字符串，不要任何解释或其他内容。"
+)
+
+
+async def _process_persona(raw: str) -> str:
+    """调用 Gemini 验证并提取有效的 system instruction，无效内容返回空字符串。"""
+    try:
+        resp = await client.aio.models.generate_content(
+            model=settings.generation_model,
+            contents=_PERSONA_PROCESS_PROMPT.format(raw=raw),
+        )
+        return (resp.text or "").strip()
+    except Exception as e:
+        logger.warning("Persona AI 处理失败，降级使用原始输入: %s", e)
+        return raw.strip()
+
+
 @app.get("/session_persona/{session_id}")
 async def get_persona(session_id: str, user=Depends(get_current_user)):
     if not await session_owned_by(session_id, user["id"]):
         raise HTTPException(status_code=403, detail="无权访问该会话")
-    return JSONResponse({"persona": await get_session_persona(session_id)})
+    # 返回原始输入供前端编辑回显
+    return JSONResponse({"persona": await get_session_persona_origin(session_id)})
 
 
 @app.post("/session_persona")
-async def set_persona(session_id: str = Form(...), persona: str = Form(""),
+async def set_persona(background_tasks: BackgroundTasks,
+                      session_id: str = Form(...), persona: str = Form(""),
                       user=Depends(get_current_user)):
     if not await session_owned_by(session_id, user["id"]):
         raise HTTPException(status_code=403, detail="无权访问该会话")
-    await update_session_persona(session_id, user["id"], persona)
+    raw = persona.strip()
+    if len(raw) > 500:
+        raise HTTPException(status_code=400, detail="性格描述不能超过500字")
+    # 立即保存原始输入
+    await save_persona_origin(session_id, user["id"], raw)
+    # AI 提取放后台，不阻塞响应
+    async def _extract():
+        processed = await _process_persona(raw) if raw else ""
+        await update_session_instruction(session_id, processed)
+    background_tasks.add_task(_extract)
     return JSONResponse({"success": True})
 
 

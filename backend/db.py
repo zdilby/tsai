@@ -20,6 +20,8 @@ async def init_db():
             user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             name TEXT,
             persona TEXT,
+            system_instruction_origin TEXT,
+            system_instruction TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -324,6 +326,7 @@ async def get_session_daily_tokens(session_id: str) -> list:
 async def get_session_info(session_id: str):
     query = """
         SELECT s.id, s.name, s.created_at, u.username,
+               s.system_instruction_origin, s.system_instruction,
                COALESCE(SUM(m.tokens_total), 0) AS total_tokens
         FROM sessions s
         JOIN users u ON s.user_id = u.id
@@ -350,17 +353,50 @@ async def update_user_max_file_size(user_id: int, max_file_size_mb: int):
 
 
 async def get_session_persona(session_id: str) -> str:
+    """返回 AI 处理后的 system_instruction，用于 Gemini 调用。"""
     row = await database.fetch_one(
-        "SELECT persona FROM sessions WHERE id = :sid",
+        "SELECT system_instruction FROM sessions WHERE id = :sid",
         values={"sid": session_id}
     )
-    return (row["persona"] or "") if row else ""
+    return (row["system_instruction"] or "") if row else ""
 
 
-async def update_session_persona(session_id: str, user_id: int, persona: str):
+async def get_session_persona_origin(session_id: str) -> str:
+    """返回用户原始输入，用于前端编辑回显。"""
+    row = await database.fetch_one(
+        "SELECT system_instruction_origin FROM sessions WHERE id = :sid",
+        values={"sid": session_id}
+    )
+    return (row["system_instruction_origin"] or "") if row else ""
+
+
+async def update_session_persona(session_id: str, user_id: int, origin: str, processed: str):
     await database.execute(
-        "UPDATE sessions SET persona = :persona WHERE id = :sid AND user_id = :uid",
-        values={"persona": persona.strip() or None, "sid": session_id, "uid": user_id}
+        """UPDATE sessions
+           SET system_instruction_origin = :origin, system_instruction = :processed
+           WHERE id = :sid AND user_id = :uid""",
+        values={
+            "origin": origin or None,
+            "processed": processed or None,
+            "sid": session_id,
+            "uid": user_id,
+        }
+    )
+
+
+async def save_persona_origin(session_id: str, user_id: int, origin: str):
+    """仅保存原始输入，不触碰 system_instruction。"""
+    await database.execute(
+        "UPDATE sessions SET system_instruction_origin = :origin WHERE id = :sid AND user_id = :uid",
+        values={"origin": origin or None, "sid": session_id, "uid": user_id}
+    )
+
+
+async def update_session_instruction(session_id: str, instruction: str):
+    """仅更新 AI 处理后的 system_instruction。"""
+    await database.execute(
+        "UPDATE sessions SET system_instruction = :v WHERE id = :sid",
+        values={"v": instruction or None, "sid": session_id}
     )
 
 

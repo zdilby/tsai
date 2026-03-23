@@ -62,6 +62,15 @@ MIGRATIONS = [
      "ALTER TABLE messages ADD COLUMN IF NOT EXISTS embedding vector(768)"),
     ("idx_messages_embedding",
      "CREATE INDEX IF NOT EXISTS idx_messages_embedding ON messages USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL"),
+
+    # sessions 表：新增 AI 处理后的 system_instruction 与原始输入字段
+    ("sessions.system_instruction_origin",
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS system_instruction_origin TEXT"),
+    ("sessions.system_instruction",
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS system_instruction TEXT"),
+    # 迁移已有 persona 数据到新字段（不重复处理已迁移行）
+    ("sessions.migrate_persona",
+     "UPDATE sessions SET system_instruction_origin = persona, system_instruction = persona WHERE persona IS NOT NULL AND system_instruction IS NULL"),
 ]
 
 
