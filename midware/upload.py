@@ -103,3 +103,40 @@ async def process_file_and_insert(file_path: Path, session_id: str):
 @router.get("/status/{session_id}")
 async def get_upload_status(session_id: str, user=Depends(get_current_user)):
     return await get_file_statuses(session_id)
+
+
+@router.post("/reprocess")
+async def reprocess_file(
+    background_tasks: BackgroundTasks,
+    session_id: str = Form(...),
+    filename: str = Form(...),
+    user=Depends(get_current_user),
+):
+    from backend.db import database
+    row = await database.fetch_one(
+        "SELECT filepath, status FROM upload_files WHERE session_id = :sid AND filename = :fname",
+        values={"sid": session_id, "fname": filename},
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="文件记录不存在")
+    if row["status"] == "processing":
+        raise HTTPException(status_code=409, detail="文件正在处理中")
+
+    file_path = settings.base_dir / row["filepath"]
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="磁盘文件不存在，请重新上传")
+
+    # 清除该文件的旧向量并重置状态
+    await database.execute(
+        "DELETE FROM knowledge_base WHERE session_id = :sid AND source_file = :src",
+        values={"sid": session_id, "src": filename},
+    )
+    await database.execute(
+        """UPDATE upload_files
+           SET status = 'pending', total_chunks = 0, processed_chunks = 0, error_msg = NULL
+           WHERE session_id = :sid AND filename = :fname""",
+        values={"sid": session_id, "fname": filename},
+    )
+
+    background_tasks.add_task(process_file_and_insert, file_path, session_id)
+    return JSONResponse({"success": True})

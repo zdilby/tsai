@@ -263,9 +263,9 @@ async function loadCollections(id) {
                     const pct = s.total_chunks > 0 ? ` ${s.processed_chunks || 0}/${s.total_chunks}` : '';
                     badgeHtml = `<span class="file-status-badge processing">⏳ 解析中${pct}</span>`;
                 } else if (s.status === 'failed') {
-                    badgeHtml = `<span class="file-status-badge failed" title="${escapeHtml(s.error_msg || '')}">❌ 失败</span>`;
+                    badgeHtml = `<span class="file-status-badge failed reprocess-btn" title="${escapeHtml(s.error_msg || '')}" data-filename="${escapeHtml(s.filename)}">❌ 失败（点击重试）</span>`;
                 } else {
-                    badgeHtml = `<span class="file-status-badge pending">⏸ 等待处理</span>`;
+                    badgeHtml = `<span class="file-status-badge pending reprocess-btn" title="点击开始处理" data-filename="${escapeHtml(s.filename)}">⏸ 等待处理（点击开始）</span>`;
                 }
                 const downloadHtml = filepath
                     ? `<a href="/${filepath}" class="secondary-content" download><i class="material-icons">get_app</i></a>`
@@ -639,5 +639,35 @@ $(function () {
         e.preventDefault();
         const aId = $('#modal-session-id').val();
         if (aId) loadCollections(aId);
+    });
+
+    // 点击 pending/failed badge 触发重新处理
+    $('#collect-modal').on('click', '.reprocess-btn', async function () {
+        const $badge = $(this);
+        const filename = $badge.data('filename');
+        const sessionId = $('#modal-session-id').val();
+        if (!filename || !sessionId) return;
+
+        $badge.text('⏳ 提交中…').removeClass('reprocess-btn').css('cursor', 'default');
+        try {
+            const formData = new FormData();
+            formData.append('session_id', sessionId);
+            formData.append('filename', filename);
+            const resp = await authFetch('/upload/reprocess', { method: 'POST', body: formData });
+            const result = await resp.json();
+            if (resp.ok && result.success) {
+                $badge.text('⏳ 解析中…').addClass('processing').removeClass('pending failed');
+                M.toast({ html: `${filename} 已开始处理`, classes: 'teal' });
+                // 触发自动轮询刷新
+                if (_collectionsRefreshTimer) clearTimeout(_collectionsRefreshTimer);
+                _collectionsRefreshTimer = setTimeout(() => loadCollections(sessionId), 3000);
+            } else {
+                $badge.addClass('reprocess-btn');
+                M.toast({ html: result.detail || '提交失败', classes: 'red lighten-2' });
+            }
+        } catch (e) {
+            $badge.addClass('reprocess-btn');
+            M.toast({ html: '请求失败', classes: 'red lighten-2' });
+        }
     });
 });

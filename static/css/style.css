@@ -488,7 +488,12 @@ ul.sidenav:not(.browser-default)>li {
 .file-status-badge.failed {
     background: #ffebee;
     color: #c62828;
-    cursor: help;
+}
+.file-status-badge.reprocess-btn {
+    cursor: pointer;
+}
+.file-status-badge.reprocess-btn:hover {
+    filter: brightness(0.92);
 }
 .collection-empty {
     padding: 16px;
