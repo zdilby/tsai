@@ -86,12 +86,22 @@ table a { color: #00897b; }
 .edit-max-token-btn:hover { opacity: 1; }
 
 /* stat cards */
+.stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+}
+.stat-row > [class*="col"] {
+    display: flex;
+    flex-direction: column;
+}
 .stat-card {
     background: #fff;
     border-radius: 8px;
     padding: 16px 20px;
     margin-bottom: 16px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    flex: 1;
 }
 .stat-label { font-size: 0.78rem; color: #90a4ae; text-transform: uppercase; letter-spacing: 0.05em; }
 .stat-value { font-size: 1.6rem; font-weight: 700; color: #263238; margin-top: 4px; }
