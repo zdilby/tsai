@@ -47,6 +47,12 @@ MIGRATIONS = [
     ("users.max_file_size_mb",
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_file_size_mb INTEGER DEFAULT 10"),
 
+    # 统一新用户每日 Token 默认值为 100000（修正旧默认值 200000 或 NULL）
+    ("users.max_daily_tokens.default",
+     "ALTER TABLE users ALTER COLUMN max_daily_tokens SET DEFAULT 100000"),
+    ("users.max_daily_tokens.fix_null",
+     "UPDATE users SET max_daily_tokens = 100000 WHERE max_daily_tokens IS NULL AND is_admin = FALSE"),
+
     # messages 表：新增历史语义检索 embedding 字段
     ("messages.embedding",
      "ALTER TABLE messages ADD COLUMN IF NOT EXISTS embedding vector(768)"),

@@ -99,7 +99,7 @@ async def init_account_tables():
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             is_admin BOOLEAN DEFAULT FALSE,
-            max_daily_tokens INTEGER DEFAULT 200000,
+            max_daily_tokens INTEGER DEFAULT 100000,
             max_file_size_mb INTEGER DEFAULT 10,
             created_at TIMESTAMP DEFAULT NOW()
         )
