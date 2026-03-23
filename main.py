@@ -9,7 +9,7 @@ import asyncio
 import uuid
 from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
-from backend.db import database, init_db, save_message, get_context, session_exists, add_knowledge, get_user_today_tokens
+from backend.db import database, init_db, save_message, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens
 from backend.rag import get_embedding, query_rag
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
@@ -49,9 +49,12 @@ async def index(request: Request, session_id: str = Query(None), user=Depends(ge
         session_id = str(uuid.uuid4())
         await new_null_session(session_id, user["id"])
         session_ex = False
-    elif await session_exists(session_id):
+    elif await session_exists(session_id) and await session_owned_by(session_id, user["id"]):
         session_ex = True
     else:
+        # session 不存在或不属于当前用户，创建新的匿名 session
+        session_id = str(uuid.uuid4())
+        await new_null_session(session_id, user["id"])
         session_ex = False
     return templates.TemplateResponse("chat.html", {"request": request, "session_id": session_id, "session_exists": session_ex, "user": user["username"]})
 
@@ -64,6 +67,8 @@ async def ping():
 @app.post("/chat")
 async def chat(session_id: str = Form(...), message: str = Form(...),
                source_files: str = Form(""), user=Depends(get_current_user)):
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
     # 检查每日 Token 配额
     max_tokens = user["max_daily_tokens"] or 0
     if max_tokens > 0:
@@ -195,6 +200,8 @@ async def get_sessions(user=Depends(get_current_user)):
 
 @app.get("/messages/{session_id}")
 async def get_messages(session_id: str, limit: int = 50, user=Depends(get_current_user)):
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
     query = "SELECT role, content FROM messages WHERE session_id = :sid ORDER BY created_at DESC LIMIT :limit"
     rows = await database.fetch_all(query, values={"sid": session_id, "limit": limit})
     return list(reversed([{"role": r["role"], "content": r["content"]} for r in rows]))
@@ -202,6 +209,8 @@ async def get_messages(session_id: str, limit: int = 50, user=Depends(get_curren
 
 @app.get("/collections/{session_id}")
 async def get_collections(session_id: str, per_page: int = 500, user=Depends(get_current_user)):
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
     query = "SELECT filename, filepath FROM upload_files WHERE session_id = :sid ORDER BY created_at DESC LIMIT :limit"
     rows = await database.fetch_all(query, values={"sid": session_id, "limit": per_page})
     return list(reversed([{"filename": r["filename"], "filepath": r["filepath"]} for r in rows]))

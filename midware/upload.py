@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from pathlib import Path
 from settings import settings, embed_client, logger
 from account import get_current_user
-from backend.db import session_exists, save_file, add_knowledge_batch, update_file_status, get_file_statuses
+from backend.db import session_exists, session_owned_by, save_file, add_knowledge_batch, update_file_status, get_file_statuses
 from backend.rag import get_embeddings_batch
 from midware.tools import (
     parse_document, split_into_paragraphs, group_paragraphs,
@@ -24,6 +24,8 @@ async def upload_file(
 ):
     if not await session_exists(session_id):
         raise HTTPException(status_code=403, detail="会话不存在")
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
 
     upload_dir: Path = settings.base_dir / "static" / "loads" / user["username"] / session_id
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -108,6 +110,8 @@ async def process_file_and_insert(file_path: Path, session_id: str):
 
 @router.get("/status/{session_id}")
 async def get_upload_status(session_id: str, user=Depends(get_current_user)):
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
     return await get_file_statuses(session_id)
 
 
@@ -119,6 +123,8 @@ async def reprocess_file(
     user=Depends(get_current_user),
 ):
     from backend.db import database
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
     row = await database.fetch_one(
         "SELECT filepath, status FROM upload_files WHERE session_id = :sid AND filename = :fname",
         values={"sid": session_id, "fname": filename},

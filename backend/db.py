@@ -128,10 +128,17 @@ async def get_context(session_id, limit=10):
     return list(reversed([dict(row) for row in rows]))
 
 
-# 检查 session 是否存在
+# 检查 session 是否存在（已命名）
 async def session_exists(session_id: str) -> bool:
     query = "SELECT 1 FROM sessions WHERE id = :session_id AND name IS NOT NULL LIMIT 1"
     row = await database.fetch_one(query, values={"session_id": session_id})
+    return row is not None
+
+
+# 检查 session 是否属于指定用户
+async def session_owned_by(session_id: str, user_id: int) -> bool:
+    query = "SELECT 1 FROM sessions WHERE id = :session_id AND user_id = :user_id LIMIT 1"
+    row = await database.fetch_one(query, values={"session_id": session_id, "user_id": user_id})
     return row is not None
 
 
