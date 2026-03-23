@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, Form, Query, Depends, HTTPException
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -36,10 +37,13 @@ async def shutdown():
     await database.disconnect()
 
 
+@app.exception_handler(StarletteHTTPException)
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code == 401:
         return RedirectResponse("/account/login")
+    if exc.status_code == 404 and "text/html" in request.headers.get("accept", ""):
+        return templates.TemplateResponse("404.html", {"request": request}, status_code=404)
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
