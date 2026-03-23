@@ -7,7 +7,16 @@ from google import genai
 from google.genai import types
 from pgvector.asyncpg import register_vector, Vector
 import asyncio
+import re
 import uuid
+
+# 回忆触发词：检测到则剥离语气词，用核心话题做历史检索
+_RECALL_PATTERNS = re.compile(
+    r'(你还记得|还记得|你记得|记得吗|之前(我们|你|咱们)?|上次(你|我们)?|'
+    r'我们(之前|以前|上次)?聊过|你(之前|以前|上次)?提到|我(之前|以前)?问过|'
+    r'我们讨论过|你说过|你提过|前面(你|我们)?)[^，。？！,.?!]*[，。？！,.?!]?',
+    re.UNICODE
+)
 from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
 from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens
@@ -99,9 +108,16 @@ async def chat(background_tasks: BackgroundTasks,
     # 近期消息中最旧的 ID，历史检索排除这些消息（避免重复）
     oldest_recent_id = context[0]["id"] if context else None
 
+    # 检测是否为主动回忆型提问，是则剥离语气词取核心话题并放宽检索阈值
+    recall_query = _RECALL_PATTERNS.sub('', message).strip()
+    is_recall = bool(recall_query and recall_query != message and len(recall_query) >= 4)
+    history_embedding = await get_embedding(embed_client, recall_query) if is_recall else query_embedding
+    history_threshold = 0.55 if is_recall else 0.4
+
     rag_results, history_results = await asyncio.gather(
         query_rag(query_embedding, session_id=session_id, source_files=source_list),
-        query_history(query_embedding, session_id=session_id, before_id=oldest_recent_id),
+        query_history(history_embedding, session_id=session_id,
+                      before_id=oldest_recent_id, threshold=history_threshold),
     )
 
     rag_text = "\n".join([r["content"] for r in rag_results])
