@@ -66,11 +66,6 @@ async def main():
             print(f"  ✗ {name}: {e}")
             await database.disconnect()
             sys.exit(1)
-    # 将现有用户中 max_daily_tokens = 0 的统一更新为新默认值
-    result = await database.execute(
-        "UPDATE users SET max_daily_tokens = 200000 WHERE max_daily_tokens = 0 AND is_admin = FALSE"
-    )
-    print(f"  ✓ 已将旧默认值 0 的用户配额更新为 200000")
 
     await database.disconnect()
     print("迁移完成。")
