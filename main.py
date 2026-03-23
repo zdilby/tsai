@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 from pgvector.asyncpg import register_vector, Vector
 import uuid
-from settings import settings, client
+from settings import settings, client, embed_client
 from account import router as account_router, get_current_user
 from backend.db import database, init_db, save_message, get_context, session_exists, add_knowledge, get_user_today_tokens
 from backend.rag import get_embedding, query_rag
@@ -80,7 +80,7 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
 
     # RAG 查询（如果前端指定了书籍则只查指定书）
     source_list = [s.strip() for s in source_files.split(',') if s.strip()] if source_files else None
-    query_embedding = await get_embedding(client, message)
+    query_embedding = await get_embedding(embed_client, message)
     rag_results = await query_rag(query_embedding, session_id=session_id, source_files=source_list)
     rag_text = "\n".join([r["content"] for r in rag_results])
     rag_citations = [
@@ -170,7 +170,7 @@ async def save_to_rag(
 ):
     if not await session_exists(session_id):
         raise HTTPException(status_code=403, detail="仅命名会话可保存到知识库")
-    embedding = await get_embedding(client, content)
+    embedding = await get_embedding(embed_client, content)
     await add_knowledge(content, embedding, session_id, source_file="对话摘要")
     return JSONResponse({"success": True})
 

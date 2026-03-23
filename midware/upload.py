@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Form
 from fastapi import UploadFile, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pathlib import Path
-from settings import settings, client, logger
+from settings import settings, client, embed_client, logger
 from account import get_current_user
 from backend.db import session_exists, save_file, add_knowledge_batch, update_file_status, get_file_statuses
 from backend.rag import get_embeddings_batch
@@ -87,7 +87,7 @@ async def process_file_and_insert(file_path: Path, session_id: str):
         enriched_chunks = await enrich_chunks_with_context(client, text, file_path.name, raw_chunks)
 
         # 批量并发 embedding
-        embeddings = await get_embeddings_batch(client, enriched_chunks)
+        embeddings = await get_embeddings_batch(embed_client, enriched_chunks)
 
         # 批量写入（单连接，单次 register_vector，executemany）
         items = list(zip(enriched_chunks, raw_chunks, embeddings))

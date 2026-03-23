@@ -45,4 +45,5 @@ class Settings(BaseModel):
 settings = Settings()
 GEMINI_API_KEY = settings.gemini_api_key
 client = genai.Client(api_key=GEMINI_API_KEY)
+embed_client = genai.Client(api_key=GEMINI_API_KEY, http_options={'api_version': 'v1'})
 logger = logging.getLogger("TSAI")
