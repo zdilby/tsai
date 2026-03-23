@@ -69,6 +69,41 @@ async def query_rag(query_embedding, session_id: str, source_files: list = None)
     return selected
 
 
+# 语义检索历史消息（仅 assistant，用于回答「我们聊过 X 吗」类问题）
+async def query_history(query_embedding, session_id: str,
+                        limit: int = 3, threshold: float = 0.4,
+                        before_id: int = None) -> list:
+    before_filter = "AND id < $5" if before_id is not None else ""
+    query = f"""
+        SELECT id, content, created_at,
+               (embedding <=> $2) AS distance
+        FROM messages
+        WHERE session_id = $1
+          AND role = 'assistant'
+          AND embedding IS NOT NULL
+          AND (embedding <=> $2) < $3
+          {before_filter}
+        ORDER BY embedding <=> $2
+        LIMIT $4
+    """
+    vector = Vector(query_embedding)
+    async with database._backend._pool.acquire() as conn:
+        await register_vector(conn)
+        args = [session_id, vector, threshold, limit]
+        if before_id is not None:
+            args.append(before_id)
+        rows = await conn.fetch(query, *args)
+    return [
+        {
+            "content": row["content"],
+            "snippet": row["content"][:300].strip(),
+            "created_at": row["created_at"],
+            "distance": round(row["distance"], 3),
+        }
+        for row in rows
+    ]
+
+
 _embed_config = types.EmbedContentConfig(output_dimensionality=settings.embedding_dim)
 
 

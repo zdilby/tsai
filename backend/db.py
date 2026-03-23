@@ -35,11 +35,17 @@ async def init_db():
             tokens_in INTEGER DEFAULT 0,
             tokens_out INTEGER DEFAULT 0,
             tokens_total INTEGER DEFAULT 0,
+            embedding vector(768),
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
     await database.execute("""
         CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_embedding
+          ON messages USING hnsw (embedding vector_cosine_ops)
+          WHERE embedding IS NOT NULL
     """)
     # 创建 upload_files 表
     await database.execute("""
@@ -108,13 +114,23 @@ async def init_account_tables():
     """)
 
 
-async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0):
+async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
     query = """INSERT INTO messages (session_id, role, content, tokens_in, tokens_out, tokens_total)
-               VALUES (:session_id, :role, :content, :tokens_in, :tokens_out, :tokens_total)"""
-    await database.execute(query, values={
+               VALUES (:session_id, :role, :content, :tokens_in, :tokens_out, :tokens_total)
+               RETURNING id"""
+    return await database.execute(query, values={
         "session_id": session_id, "role": role, "content": content,
         "tokens_in": tokens_in, "tokens_out": tokens_out, "tokens_total": tokens_total,
     })
+
+
+async def update_message_embedding(message_id: int, embedding):
+    async with database._backend._pool.acquire() as conn:
+        await register_vector(conn)
+        await conn.execute(
+            "UPDATE messages SET embedding = $1 WHERE id = $2",
+            Vector(embedding), message_id
+        )
 
 
 async def save_file(session_id, filename, filepath):
@@ -123,7 +139,7 @@ async def save_file(session_id, filename, filepath):
 
 
 async def get_context(session_id, limit=10):
-    query = "SELECT role, content FROM messages WHERE session_id = :session_id ORDER BY id DESC LIMIT :limit"
+    query = "SELECT id, role, content FROM messages WHERE session_id = :session_id ORDER BY id DESC LIMIT :limit"
     rows = await database.fetch_all(query, values={"session_id": session_id, "limit": limit})
     return list(reversed([dict(row) for row in rows]))
 

@@ -46,6 +46,12 @@ MIGRATIONS = [
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daily_tokens INTEGER DEFAULT 200000"),
     ("users.max_file_size_mb",
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_file_size_mb INTEGER DEFAULT 10"),
+
+    # messages 表：新增历史语义检索 embedding 字段
+    ("messages.embedding",
+     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS embedding vector(768)"),
+    ("idx_messages_embedding",
+     "CREATE INDEX IF NOT EXISTS idx_messages_embedding ON messages USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL"),
 ]
 
 

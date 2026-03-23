@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Form, Query, Depends, HTTPException
+from fastapi import FastAPI, Request, Form, Query, Depends, HTTPException, BackgroundTasks
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -10,8 +10,8 @@ import asyncio
 import uuid
 from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
-from backend.db import database, init_db, save_message, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens
-from backend.rag import get_embedding, query_rag
+from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens
+from backend.rag import get_embedding, query_rag, query_history
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
 from admin import admin_router
@@ -69,7 +69,8 @@ async def ping():
 
 
 @app.post("/chat")
-async def chat(session_id: str = Form(...), message: str = Form(...),
+async def chat(background_tasks: BackgroundTasks,
+               session_id: str = Form(...), message: str = Form(...),
                source_files: str = Form(""), user=Depends(get_current_user)):
     if not await session_owned_by(session_id, user["id"]):
         raise HTTPException(status_code=403, detail="无权访问该会话")
@@ -94,7 +95,15 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
         get_embedding(embed_client, message),
         fetch_from_web(message),
     )
-    rag_results = await query_rag(query_embedding, session_id=session_id, source_files=source_list)
+
+    # 近期消息中最旧的 ID，历史检索排除这些消息（避免重复）
+    oldest_recent_id = context[0]["id"] if context else None
+
+    rag_results, history_results = await asyncio.gather(
+        query_rag(query_embedding, session_id=session_id, source_files=source_list),
+        query_history(query_embedding, session_id=session_id, before_id=oldest_recent_id),
+    )
+
     rag_text = "\n".join([r["content"] for r in rag_results])
     rag_citations = [
         {
@@ -113,8 +122,18 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
         "Relevant info from uploaded documents:\n（当前问题在知识库中未找到相关文档内容）\n\n"
     )
     web_section = f"Latest info from web:\n{web_info}\n\n" if web_info else ""
+    if history_results:
+        history_items = "\n".join([
+            f"[{r['created_at'].strftime('%Y-%m-%d') if hasattr(r['created_at'], 'strftime') else str(r['created_at'])[:10]}] "
+            f"{r['snippet']}{'…' if len(r['content']) > 300 else ''}"
+            for r in history_results
+        ])
+        history_section = f"Relevant excerpts from past conversation in this session:\n{history_items}\n\n"
+    else:
+        history_section = ""
     prompt = (
         f"Context:\n{context_text}\n\n"
+        f"{history_section}"
         f"{rag_section}"
         f"{web_section}"
         f"如果回答引用了上传文档的原文或观点，请在该句末尾用括号标注来源，格式为（来源：文件名，第N段）。直接引用原文时请加引号。\n"
@@ -138,8 +157,18 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
     tokens_in  = getattr(usage, "prompt_token_count",     0) or 0
     tokens_out = getattr(usage, "candidates_token_count", 0) or 0
     tokens_total = getattr(usage, "total_token_count",    0) or 0
-    await save_message(session_id, "assistant", answer,
-                       tokens_in=tokens_in, tokens_out=tokens_out, tokens_total=tokens_total)
+    msg_id = await save_message(session_id, "assistant", answer,
+                                tokens_in=tokens_in, tokens_out=tokens_out, tokens_total=tokens_total)
+
+    # 后台异步为该条消息计算并存储 embedding，供历史检索使用
+    async def _save_embedding():
+        try:
+            emb = await get_embedding(embed_client, answer[:2000])
+            await update_message_embedding(msg_id, emb)
+        except Exception as e:
+            logger.warning("历史消息 embedding 存储失败 (id=%s): %s", msg_id, e)
+
+    background_tasks.add_task(_save_embedding)
     return JSONResponse({"answer": answer, "citations": rag_citations})
 
 
