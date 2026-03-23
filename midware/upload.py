@@ -37,7 +37,7 @@ async def upload_file(
     content = await file.read()
 
     # 检查文件大小限制（0 表示不限制）
-    max_mb = user.get("max_file_size_mb") or 10
+    max_mb = user["max_file_size_mb"] or 10
     if max_mb > 0 and len(content) > max_mb * 1024 * 1024:
         size_mb = round(len(content) / 1024 / 1024, 1)
         raise HTTPException(
