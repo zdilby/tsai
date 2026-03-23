@@ -29,7 +29,7 @@ class Settings(BaseModel):
     google_api_key: str | None = os.getenv("GOOGLE_SEARCH_KEY")
     google_cx: str | None = os.getenv("GOOGLE_CX")
     generation_model: str = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-    embedding_model: str = os.getenv("GEMINI_EMBED_MODEL", "text-embedding-004")
+    embedding_model: str = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-exp-03-07")
     embedding_dim: int = int(os.getenv("EMBEDDING_DIM", "768"))
     top_k: int = int(os.getenv("TOP_K", "4"))
     top_k_max: int = int(os.getenv("TOP_K_MAX", "20"))
@@ -45,5 +45,5 @@ class Settings(BaseModel):
 settings = Settings()
 GEMINI_API_KEY = settings.gemini_api_key
 client = genai.Client(api_key=GEMINI_API_KEY)
-embed_client = genai.Client(api_key=GEMINI_API_KEY, http_options={'api_version': 'v1'})
+embed_client = client  # embedding 与 generation 共用同一客户端（v1beta）
 logger = logging.getLogger("TSAI")
