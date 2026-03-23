@@ -50,9 +50,25 @@ def _text_to_markdown(text: str) -> str:
 
 def _pdf_to_markdown_sync(pdf_path: Path) -> str:
     """
-    同步 PDF → Markdown 转换（300 DPI OCR，支持中英文）。
+    同步 PDF → Markdown 转换。
+    优先用 pdfplumber 直接提取文字（速度快、省内存）；
+    若提取内容不足（扫描版 PDF），降级为逐页 OCR（150 DPI）。
     在线程池中调用，避免阻塞事件循环。
     """
+    # ── 尝试 pdfplumber 直接提取文字 ──────────────────────────────
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            pages_text = [p.extract_text() or "" for p in pdf.pages]
+        full_text = "\n".join(pages_text).strip()
+        avg_chars = len(full_text) / max(len(pages_text), 1)
+        if avg_chars >= 50:   # 每页至少 50 字符，认为是文字型 PDF
+            logger.info("PDF 文字提取成功（均 %.0f 字/页）: %s", avg_chars, pdf_path.name)
+            return _text_to_markdown(full_text)
+        logger.info("PDF 文字提取内容不足（均 %.0f 字/页），改用 OCR: %s", avg_chars, pdf_path.name)
+    except Exception as e:
+        logger.warning("pdfplumber 提取失败，改用 OCR: %s — %s", pdf_path.name, e)
+
+    # ── 降级：逐页 OCR，150 DPI，避免全量加载占用过多内存 ────────
     try:
         from pdf2image import convert_from_path
         import pytesseract
@@ -61,11 +77,15 @@ def _pdf_to_markdown_sync(pdf_path: Path) -> str:
             f"PDF OCR 依赖未安装: {e}。请运行: pip install pdf2image pytesseract"
         ) from e
 
-    images = convert_from_path(str(pdf_path), dpi=300)
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        page_count = len(pdf.pages)
+
     text = ""
-    for img in images:
-        t = pytesseract.image_to_string(img, lang="chi_sim+eng")
-        text += t + "\n"
+    for i in range(1, page_count + 1):
+        images = convert_from_path(str(pdf_path), dpi=150, first_page=i, last_page=i)
+        for img in images:
+            text += pytesseract.image_to_string(img, lang="chi_sim+eng") + "\n"
+        del images  # 释放当页图片内存
     return _text_to_markdown(text)
 
 

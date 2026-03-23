@@ -96,7 +96,8 @@ async def process_file_and_insert(file_path: Path, session_id: str):
         await update_file_status(session_id, file_path.name, 'done', processed=len(raw_chunks))
         logger.info("文件处理完成: %s (%d chunks)", file_path.name, len(raw_chunks))
     except Exception as e:
-        await update_file_status(session_id, file_path.name, 'failed', error=str(e))
+        error_msg = str(e) or f"{type(e).__name__}"
+        await update_file_status(session_id, file_path.name, 'failed', error=error_msg)
         logger.exception("处理文件 %s 出错: %s", file_path.name, e)
 
 
