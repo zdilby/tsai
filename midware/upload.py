@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Form
 from fastapi import UploadFile, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pathlib import Path
-from settings import settings, client, embed_client, logger
+from settings import settings, embed_client, logger
 from account import get_current_user
 from backend.db import session_exists, save_file, add_knowledge_batch, update_file_status, get_file_statuses
 from backend.rag import get_embeddings_batch
@@ -86,10 +86,8 @@ async def process_file_and_insert(file_path: Path, session_id: str):
         logger.info("分块完成: %s (%d chunks)", file_path.name, len(raw_chunks))
         await update_file_status(session_id, file_path.name, 'processing', total=len(raw_chunks))
 
-        # Gemini 上下文增强（1次摘要调用）
-        logger.info("Gemini 上下文增强开始: %s", file_path.name)
-        enriched_chunks = await enrich_chunks_with_context(client, text, file_path.name, raw_chunks)
-        logger.info("Gemini 上下文增强完成: %s", file_path.name)
+        # 上下文增强（本地操作，无 API 调用）
+        enriched_chunks = enrich_chunks_with_context(text, file_path.name, raw_chunks)
 
         # 批量 embedding
         logger.info("Embedding 开始: %s (%d chunks)", file_path.name, len(enriched_chunks))

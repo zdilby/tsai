@@ -270,38 +270,18 @@ def group_paragraphs(paragraphs: List[str], max_size: int = 800) -> List[str]:
 
 # ── Gemini 上下文增强 ─────────────────────────────────────────
 
-async def enrich_chunks_with_context(client, doc_text: str, filename: str, chunks: List[str]) -> List[str]:
+def enrich_chunks_with_context(doc_text: str, filename: str, chunks: List[str]) -> List[str]:
     """
-    用 1 次 Gemini 调用生成文档摘要，然后为每个 chunk 拼接上下文头。
-    enriched chunk = [来源+摘要+位置头] + 原始 chunk 文本
+    为每个 chunk 拼接上下文头，使 embedding 携带来源和位置信息。
+    使用文档开头的自然文字作为上下文摘要，无需 Gemini API 调用。
     """
-    from settings import logger
-    summary_prompt = (
-        f"请用1-2句话概括以下文档的主要内容和主题，输出简洁精准的描述：\n\n{doc_text[:3000]}"
-    )
-    for attempt in range(6):
-        try:
-            resp = await client.aio.models.generate_content(
-                model=settings.generation_model,
-                contents=summary_prompt
-            )
-            break
-        except Exception as e:
-            if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
-                wait = 30 * (2 ** attempt)
-                logger.warning("摘要生成触发限流，%ds 后重试 (第 %d 次)", wait, attempt + 1)
-                await asyncio.sleep(wait)
-            else:
-                raise
-    else:
-        raise RuntimeError("摘要生成超过最大重试次数")
-    doc_summary = resp.text.strip()
-
-    enriched = []
+    # 取文档前 300 字作为上下文提示（去除多余空白）
+    doc_intro = " ".join(doc_text[:500].split())[:300]
     total = len(chunks)
+    enriched = []
     for i, chunk in enumerate(chunks):
         header = (
-            f"[来源文件：{filename}。文档摘要：{doc_summary}。"
+            f"[来源文件：{filename}。文档开头：{doc_intro}。"
             f"位置：第{i + 1}段，共{total}段。]\n\n"
         )
         enriched.append(header + chunk)
