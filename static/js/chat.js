@@ -263,16 +263,19 @@ async function loadCollections(id) {
                     const pct = s.total_chunks > 0 ? ` ${s.processed_chunks || 0}/${s.total_chunks}` : '';
                     badgeHtml = `<span class="file-status-badge processing">⏳ 解析中${pct}</span>`;
                 } else if (s.status === 'failed') {
-                    badgeHtml = `<span class="file-status-badge failed reprocess-btn" title="${escapeHtml(s.error_msg || '')}" data-filename="${escapeHtml(s.filename)}">❌ 失败</span>`;
+                    badgeHtml = `<span class="file-status-badge failed reprocess-btn" data-filename="${escapeHtml(s.filename)}">❌ 失败，点击重试</span>`;
                 } else {
                     badgeHtml = `<span class="file-status-badge pending reprocess-btn" title="点击开始处理" data-filename="${escapeHtml(s.filename)}">⏸ 等待处理</span>`;
                 }
+                const errorHtml = (s.status === 'failed' && s.error_msg)
+                    ? `<div class="file-error-msg">${escapeHtml(s.error_msg)}</div>`
+                    : '';
                 const downloadHtml = filepath
                     ? `<a href="/${filepath}" class="secondary-content" download><i class="material-icons">get_app</i></a>`
                     : '';
                 const $li = $(`
                     <li class="collection-item">
-                        <div>${escapeHtml(s.filename)} ${badgeHtml}${downloadHtml}</div>
+                        <div>${escapeHtml(s.filename)} ${badgeHtml}${downloadHtml}${errorHtml}</div>
                     </li>
                 `);
                 $collectList.append($li);

@@ -495,6 +495,12 @@ ul.sidenav:not(.browser-default)>li {
 .file-status-badge.reprocess-btn:hover {
     filter: brightness(0.92);
 }
+.file-error-msg {
+    font-size: 0.75em;
+    color: #c62828;
+    margin-top: 3px;
+    word-break: break-all;
+}
 .collection-empty {
     padding: 16px;
     color: #888;
