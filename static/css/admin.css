@@ -1,0 +1,178 @@
+@font-face {
+    font-family: 'Material Icons';
+    font-style: normal;
+    font-weight: 400;
+    src: url(/static/materialize/flUhRq6tzZclQEJ-Vdg-IuiaDsNcIhQ8tQ.woff2) format('woff2');
+}
+.material-icons {
+    font-family: 'Material Icons';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-smoothing: antialiased;
+}
+
+body { background: #f5f5f5; margin: 0; font-family: sans-serif; }
+
+.admin-nav {
+    background: #263238 !important;
+    height: 52px;
+    line-height: 52px;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+}
+.admin-nav .nav-wrapper {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 12px;
+}
+.admin-nav .brand-text {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #fff;
+    flex: 1;
+}
+.admin-nav .back-link {
+    color: #b0bec5;
+    text-decoration: none;
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+.admin-nav .back-link:hover { color: #fff; }
+.admin-nav .admin-badge {
+    font-size: 0.82rem;
+    color: #b0bec5;
+    white-space: nowrap;
+}
+
+.admin-container {
+    max-width: 1100px;
+    margin: 28px auto;
+    padding: 0 20px;
+}
+
+.section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #455a64;
+    border-bottom: 2px solid #e0e0e0;
+    padding-bottom: 6px;
+    margin-bottom: 14px;
+}
+
+table thead tr { background: #eceff1; }
+table thead th { color: #37474f; font-weight: 600; font-size: 0.85rem; }
+table tbody td { font-size: 0.88rem; vertical-align: middle; }
+table tbody tr:hover { background: #f9f9f9; }
+table a { color: #00897b; }
+
+.compact-table td, .compact-table th { padding: 6px 12px; }
+
+.edit-max-token-btn {
+    cursor: pointer;
+    margin-left: 6px;
+    font-size: 0.85em;
+    opacity: 0.6;
+}
+.edit-max-token-btn:hover { opacity: 1; }
+
+/* stat cards */
+.stat-card {
+    background: #fff;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+.stat-label { font-size: 0.78rem; color: #90a4ae; text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-value { font-size: 1.6rem; font-weight: 700; color: #263238; margin-top: 4px; }
+
+.empty-tip { color: #aaa; font-size: 0.9rem; padding: 8px 0; }
+
+/* message list in session detail */
+.messages-list { display: flex; flex-direction: column; gap: 10px; }
+.msg-item {
+    background: #fff;
+    border-radius: 8px;
+    padding: 12px 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    border-left: 4px solid #e0e0e0;
+}
+.msg-item.user { border-left-color: #26a69a; }
+.msg-item.assistant { border-left-color: #7e57c2; }
+.msg-meta {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+.msg-role { font-weight: 600; font-size: 0.82rem; color: #546e7a; text-transform: uppercase; }
+.msg-time { font-size: 0.78rem; color: #aaa; }
+.msg-tokens { font-size: 0.78rem; color: #80cbc4; margin-left: auto; }
+.msg-content {
+    font-size: 0.88rem;
+    color: #37474f;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+    line-height: 1.5;
+}
+
+/* 文件状态徽标（复用 chat 样式） */
+.file-status-badge {
+    display: inline-block;
+    font-size: 0.78em;
+    padding: 1px 7px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+.file-status-badge.done       { background: #e0f2f1; color: #00796b; }
+.file-status-badge.processing { background: #fff8e1; color: #f57f17; }
+.file-status-badge.pending    { background: #f3e5f5; color: #7b1fa2; }
+.file-status-badge.failed     { background: #ffebee; color: #c62828; cursor: help; }
+
+/* edit modal */
+.modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+}
+.modal-box {
+    background: #fff;
+    border-radius: 10px;
+    padding: 24px 28px;
+    min-width: 280px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+}
+.modal-box h6 { margin: 0 0 8px; font-weight: 600; }
+.unlimited-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: #546e7a;
+}
+.unlimited-row input[type=checkbox] {
+    width: 16px; height: 16px; cursor: pointer;
+}
+.modal-box input[type=number] {
+    width: 100%; padding: 8px; border: 1px solid #ccc;
+    border-radius: 4px; font-size: 1rem; margin: 4px 0 10px;
+}
+.modal-box input[type=number]:disabled {
+    background: #f5f5f5; color: #aaa; cursor: not-allowed;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }

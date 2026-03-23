@@ -6,7 +6,7 @@ from google.genai import types
 import os
 import logging
 
-load_dotenv()
+load_dotenv(override=True)
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 LOG_FILE = LOG_DIR / "process.log"
@@ -26,12 +26,17 @@ logging.basicConfig(
 class Settings(BaseModel):
     database_url: str = os.getenv("DATABASE_URL")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
-    google_api_key: str | None = os.getenv("GOOGLE_API_KEY")
+    google_api_key: str | None = os.getenv("GOOGLE_SEARCH_KEY")
     google_cx: str | None = os.getenv("GOOGLE_CX")
     generation_model: str = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
     embedding_model: str = os.getenv("GEMINI_EMBED_MODEL", "text-embedding-004")
     embedding_dim: int = int(os.getenv("EMBEDDING_DIM", "768"))
     top_k: int = int(os.getenv("TOP_K", "4"))
+    top_k_max: int = int(os.getenv("TOP_K_MAX", "20"))
+    top_k_margin: float = float(os.getenv("TOP_K_MARGIN", "0.07"))  # 距最佳匹配的最大额外距离
+    top_k_gap: float = float(os.getenv("TOP_K_GAP", "0.05"))        # 触发截断的最小跳变间隔
+    rag_distance_threshold: float = float(os.getenv("RAG_DISTANCE_THRESHOLD", "0.40"))
+    hnsw_ef_search: int = int(os.getenv("HNSW_EF_SEARCH", "100"))
     max_history_turns: int = int(os.getenv("MAX_HISTORY_TURNS", "12"))
     secret_key: str = os.getenv("SECRET_KEY")
     base_dir: Path = BASE_DIR

@@ -8,15 +8,17 @@ from pgvector.asyncpg import register_vector, Vector
 import uuid
 from settings import settings, client
 from account import router as account_router, get_current_user
-from backend.db import database, init_db, save_message, get_context, add_knowledge, session_exists
+from backend.db import database, init_db, save_message, get_context, session_exists, add_knowledge, get_user_today_tokens
 from backend.rag import get_embedding, query_rag
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
+from admin import admin_router
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(account_router, prefix="/account", tags=["account"])
 app.include_router(upload_router, prefix="/upload", tags=["upload"])
+app.include_router(admin_router, prefix="/admin", tags=["admin"])
 templates = Jinja2Templates(directory="templates")
 
 
@@ -48,6 +50,8 @@ async def index(request: Request, session_id: str = Query(None), user=Depends(ge
         session_ex = False
     elif await session_exists(session_id):
         session_ex = True
+    else:
+        session_ex = False
     return templates.TemplateResponse("chat.html", {"request": request, "session_id": session_id, "session_exists": session_ex, "user": user["username"]})
 
 
@@ -57,7 +61,15 @@ async def ping():
 
 
 @app.post("/chat")
-async def chat(session_id: str = Form(...), message: str = Form(...), user=Depends(get_current_user)):
+async def chat(session_id: str = Form(...), message: str = Form(...),
+               source_files: str = Form(""), user=Depends(get_current_user)):
+    # 检查每日 Token 配额
+    max_tokens = user["max_daily_tokens"] or 0
+    if max_tokens > 0:
+        today_used = await get_user_today_tokens(user["id"])
+        if today_used >= max_tokens:
+            raise HTTPException(status_code=429, detail=f"今日 Token 配额已用完（上限 {max_tokens}）")
+
     # 保存用户消息
     await save_message(session_id, "user", message)
     # print('message: ', message)
@@ -66,29 +78,36 @@ async def chat(session_id: str = Form(...), message: str = Form(...), user=Depen
     context = await get_context(session_id)
     context_text = "\n".join([f"{c['role']}: {c['content']}" for c in context])
 
-    # RAG 查询
+    # RAG 查询（如果前端指定了书籍则只查指定书）
+    source_list = [s.strip() for s in source_files.split(',') if s.strip()] if source_files else None
     query_embedding = await get_embedding(client, message)
-    rag_results = await query_rag(query_embedding, session_id=session_id)
+    rag_results = await query_rag(query_embedding, session_id=session_id, source_files=source_list)
     rag_text = "\n".join([r["content"] for r in rag_results])
     rag_citations = [
-        {"source": r["source_file"], "chunk": r["chunk_index"],
-         "score": round(1 - r["distance"], 3)}
+        {
+            "source": r["source_file"],
+            "chunk": r["chunk_index"],
+            "score": round(1 - r["distance"], 3),
+            "snippet": (r.get("original_content") or "")[:200].strip(),
+        }
         for r in rag_results if r.get("source_file")
     ]
 
-    # 执行 Google 搜索获取最新网络信息
+    # 执行 Google 搜索获取最新网络信息（不再写入 knowledge_base，避免污染 RAG 向量空间）
     web_info = await fetch_from_web(message)
-    if web_info:
-        # 将新抓取到的内容存进知识库
-        if await session_exists(session_id):
-            await add_knowledge(web_info, await get_embedding(client, web_info), session_id=session_id)
 
     # 构建提示词 prompt
+    rag_section = (
+        f"Relevant info from uploaded documents:\n{rag_text}\n\n"
+        if rag_results else
+        "Relevant info from uploaded documents:\n（当前问题在知识库中未找到相关文档内容）\n\n"
+    )
+    web_section = f"Latest info from web:\n{web_info}\n\n" if web_info else ""
     prompt = (
         f"Context:\n{context_text}\n\n"
-        f"Relevant info from RAG:\n{rag_text}\n\n"
-        f"Latest info from web:\n{web_info}\n\n"
-        f"如果回答参考了上传文档中的内容，请简要注明来自哪个文件。\n"
+        f"{rag_section}"
+        f"{web_section}"
+        f"如果回答引用了上传文档的原文或观点，请在该句末尾用括号标注来源，格式为（来源：文件名，第N段）。直接引用原文时请加引号。\n"
         f"User: {message}\nAI:"
     )
     # print('prompt: ', prompt)
@@ -101,8 +120,12 @@ async def chat(session_id: str = Form(...), message: str = Form(...), user=Depen
     chat = client.aio.chats.create(model=settings.generation_model, config=config)
     resp = await chat.send_message(prompt)
     answer = resp.text
-    # print('answer: ', answer)
-    await save_message(session_id, "assistant", answer)
+    usage = resp.usage_metadata
+    tokens_in  = getattr(usage, "prompt_token_count",     0) or 0
+    tokens_out = getattr(usage, "candidates_token_count", 0) or 0
+    tokens_total = getattr(usage, "total_token_count",    0) or 0
+    await save_message(session_id, "assistant", answer,
+                       tokens_in=tokens_in, tokens_out=tokens_out, tokens_total=tokens_total)
     return JSONResponse({"answer": answer, "citations": rag_citations})
 
 
@@ -137,6 +160,19 @@ async def del_session(session_id: str = Form(...), user=Depends(get_current_user
         return {"id": session_id, "success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.post("/save_to_rag")
+async def save_to_rag(
+    session_id: str = Form(...),
+    content: str = Form(...),
+    user=Depends(get_current_user)
+):
+    if not await session_exists(session_id):
+        raise HTTPException(status_code=403, detail="仅命名会话可保存到知识库")
+    embedding = await get_embedding(client, content)
+    await add_knowledge(content, embedding, session_id, source_file="对话摘要")
+    return JSONResponse({"success": True})
 
 
 async def new_null_session(session_id: str, user_id: int):

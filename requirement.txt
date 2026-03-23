@@ -15,6 +15,7 @@ click==8.1.8
 cryptography==45.0.7
 databases==0.9.0
 docx2txt==0.9
+ebooklib==0.20
 ecdsa==0.19.1
 exceptiongroup==1.3.0
 faiss-cpu==1.9.0
@@ -35,8 +36,10 @@ multidict==6.6.4
 numpy==2.0.2
 packaging==25.0
 passlib==1.7.4
+pdf2image==1.17.0
 pdfminer.six==20250506
 pdfplumber==0.11.7
+pytesseract==0.3.13
 pgvector==0.4.1
 pillow==11.3.0
 propcache==0.3.2

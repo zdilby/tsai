@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Session 详情 · TSAI 管理后台</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/static/images/favicon.png">
+    <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+<nav class="admin-nav">
+    <div class="nav-wrapper">
+        <a href="javascript:history.back()" class="back-link">← 返回</a>
+        <span class="brand-text">Session「{{ info.name }}」</span>
+        <span class="admin-badge">{{ admin.username }}</span>
+    </div>
+</nav>
+<div class="admin-container">
+
+    <div class="row">
+        <div class="col s12 m4">
+            <div class="stat-card">
+                <div class="stat-label">所属用户</div>
+                <div class="stat-value" style="font-size:1.2rem;">{{ info.username }}</div>
+            </div>
+        </div>
+        <div class="col s12 m4">
+            <div class="stat-card">
+                <div class="stat-label">累计 Token</div>
+                <div class="stat-value">{{ info.total_tokens | int }}</div>
+            </div>
+        </div>
+        <div class="col s12 m4">
+            <div class="stat-card">
+                <div class="stat-label">消息数</div>
+                <div class="stat-value">{{ messages | length }}</div>
+            </div>
+        </div>
+    </div>
+
+    <h5 class="section-title">每日 Token 使用</h5>
+    {% if daily %}
+    <table class="striped responsive-table compact-table">
+        <thead><tr><th>日期</th><th>Token 用量</th><th>消息数</th></tr></thead>
+        <tbody>
+        {% for d in daily %}
+            <tr><td>{{ d.date }}</td><td>{{ d.tokens | int }}</td><td>{{ d.message_count }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-tip">暂无数据</p>
+    {% endif %}
+
+    <h5 class="section-title" style="margin-top:2em;">上传文件</h5>
+    {% if files %}
+    <table class="striped responsive-table compact-table">
+        <thead>
+            <tr><th>文件名</th><th>状态</th><th>入库段数</th><th>上传时间</th><th>下载</th></tr>
+        </thead>
+        <tbody>
+        {% for f in files %}
+            <tr>
+                <td>{{ f.filename }}</td>
+                <td>
+                    {% if f.status == 'done' %}
+                        <span class="file-status-badge done">✓ 完成</span>
+                    {% elif f.status == 'processing' %}
+                        <span class="file-status-badge processing">⏳ 处理中 {{ f.processed_chunks or 0 }}/{{ f.total_chunks or 0 }}</span>
+                    {% elif f.status == 'failed' %}
+                        <span class="file-status-badge failed" title="{{ f.error_msg or '' }}">❌ 失败</span>
+                    {% else %}
+                        <span class="file-status-badge pending">⏸ 等待</span>
+                    {% endif %}
+                </td>
+                <td>{{ f.total_chunks or 0 }}</td>
+                <td>{{ f.created_at.strftime('%Y-%m-%d %H:%M') if f.created_at else '' }}</td>
+                <td>
+                    {% if f.filepath %}
+                    <a href="/{{ f.filepath }}" download title="下载">
+                        <i class="material-icons" style="font-size:18px;vertical-align:middle;color:#00897b;">get_app</i>
+                    </a>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-tip">该 Session 暂无上传文件</p>
+    {% endif %}
+
+    <h5 class="section-title" style="margin-top:2em;">对话内容</h5>
+    <div class="messages-list">
+    {% for m in messages %}
+        <div class="msg-item {{ m.role }}">
+            <div class="msg-meta">
+                <span class="msg-role">{{ '用户' if m.role == 'user' else 'AI' }}</span>
+                <span class="msg-time">{{ m.created_at.strftime('%Y-%m-%d %H:%M') if m.created_at else '' }}</span>
+                {% if m.tokens_total %}
+                <span class="msg-tokens">{{ m.tokens_total }} tokens</span>
+                {% endif %}
+            </div>
+            <div class="msg-content">{{ m.content }}</div>
+        </div>
+    {% else %}
+        <p class="empty-tip">暂无消息</p>
+    {% endfor %}
+    </div>
+</div>
+</body>
+</html>

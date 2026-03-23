@@ -99,9 +99,13 @@ async def init_account_tables():
     """)
 
 
-async def save_message(session_id, role, content):
-    query = "INSERT INTO messages (session_id, role, content) VALUES (:session_id, :role, :content)"
-    await database.execute(query, values={"session_id": session_id, "role": role, "content": content})
+async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0):
+    query = """INSERT INTO messages (session_id, role, content, tokens_in, tokens_out, tokens_total)
+               VALUES (:session_id, :role, :content, :tokens_in, :tokens_out, :tokens_total)"""
+    await database.execute(query, values={
+        "session_id": session_id, "role": role, "content": content,
+        "tokens_in": tokens_in, "tokens_out": tokens_out, "tokens_total": tokens_total,
+    })
 
 
 async def save_file(session_id, filename, filepath):
@@ -123,15 +127,15 @@ async def session_exists(session_id: str) -> bool:
 
 
 # 将新抓取到的内容存进知识库（单条，兼容 /chat web 内容写入）
-async def add_knowledge(content, embedding, session_id):
+async def add_knowledge(content, embedding, session_id, source_file: str = None):
     query = """
-        INSERT INTO knowledge_base (content, embedding, session_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO knowledge_base (content, embedding, session_id, source_file)
+        VALUES ($1, $2, $3, $4)
     """
     vector = Vector(embedding)
     async with database._backend._pool.acquire() as conn:
         await register_vector(conn)
-        await conn.execute(query, content, vector, session_id)
+        await conn.execute(query, content, vector, session_id, source_file)
 
 
 # 批量写入知识库（文件上传专用，单连接 executemany）
@@ -181,3 +185,125 @@ async def get_file_statuses(session_id: str) -> list:
     """
     rows = await database.fetch_all(query, values={"session_id": session_id})
     return [dict(row) for row in rows]
+
+
+# ── Admin 相关查询 ─────────────────────────────────────────────
+
+async def get_user_today_tokens(user_id: int) -> int:
+    query = """
+        SELECT COALESCE(SUM(m.tokens_total), 0)
+        FROM messages m
+        JOIN sessions s ON m.session_id = s.id
+        WHERE s.user_id = :user_id AND DATE(m.created_at) = CURRENT_DATE
+    """
+    row = await database.fetch_one(query, values={"user_id": user_id})
+    return int(row[0]) if row else 0
+
+
+async def get_all_users_with_stats() -> list:
+    query = """
+        SELECT u.id, u.username, u.is_admin, u.max_daily_tokens, u.created_at,
+               COUNT(DISTINCT s.id) AS session_count,
+               COALESCE(SUM(m.tokens_total), 0) AS total_tokens,
+               COALESCE(SUM(CASE WHEN DATE(m.created_at) = CURRENT_DATE THEN m.tokens_total ELSE 0 END), 0) AS today_tokens
+        FROM users u
+        LEFT JOIN sessions s ON s.user_id = u.id AND s.name IS NOT NULL
+        LEFT JOIN messages m ON m.session_id = s.id
+        WHERE u.is_admin = FALSE
+        GROUP BY u.id
+        ORDER BY u.id
+    """
+    rows = await database.fetch_all(query)
+    return [dict(r) for r in rows]
+
+
+async def get_user_by_id(user_id: int):
+    row = await database.fetch_one("SELECT * FROM users WHERE id = :id", values={"id": user_id})
+    return dict(row) if row else None
+
+
+async def get_user_sessions_with_stats(user_id: int) -> list:
+    query = """
+        SELECT s.id, s.name, s.created_at,
+               COUNT(m.id) AS message_count,
+               COALESCE(SUM(m.tokens_total), 0) AS total_tokens
+        FROM sessions s
+        LEFT JOIN messages m ON m.session_id = s.id
+        WHERE s.user_id = :user_id AND s.name IS NOT NULL
+        GROUP BY s.id
+        ORDER BY s.created_at DESC
+    """
+    rows = await database.fetch_all(query, values={"user_id": user_id})
+    return [dict(r) for r in rows]
+
+
+async def get_user_daily_tokens(user_id: int) -> list:
+    query = """
+        SELECT DATE(m.created_at) AS date,
+               SUM(m.tokens_total) AS tokens
+        FROM messages m
+        JOIN sessions s ON m.session_id = s.id
+        WHERE s.user_id = :user_id
+        GROUP BY DATE(m.created_at)
+        ORDER BY date DESC
+        LIMIT 30
+    """
+    rows = await database.fetch_all(query, values={"user_id": user_id})
+    return [dict(r) for r in rows]
+
+
+async def get_session_messages_detail(session_id: str) -> list:
+    query = """
+        SELECT role, content, tokens_in, tokens_out, tokens_total, created_at
+        FROM messages
+        WHERE session_id = :sid
+        ORDER BY created_at
+    """
+    rows = await database.fetch_all(query, values={"sid": session_id})
+    return [dict(r) for r in rows]
+
+
+async def get_session_files(session_id: str) -> list:
+    query = """
+        SELECT filename, filepath, status, total_chunks, processed_chunks, error_msg, created_at
+        FROM upload_files
+        WHERE session_id = :session_id
+        ORDER BY created_at
+    """
+    rows = await database.fetch_all(query, values={"session_id": session_id})
+    return [dict(r) for r in rows]
+
+
+async def get_session_daily_tokens(session_id: str) -> list:
+    query = """
+        SELECT DATE(created_at) AS date,
+               SUM(tokens_total) AS tokens,
+               COUNT(*) AS message_count
+        FROM messages
+        WHERE session_id = :sid
+        GROUP BY DATE(created_at)
+        ORDER BY date DESC
+    """
+    rows = await database.fetch_all(query, values={"sid": session_id})
+    return [dict(r) for r in rows]
+
+
+async def get_session_info(session_id: str):
+    query = """
+        SELECT s.id, s.name, s.created_at, u.username,
+               COALESCE(SUM(m.tokens_total), 0) AS total_tokens
+        FROM sessions s
+        JOIN users u ON s.user_id = u.id
+        LEFT JOIN messages m ON m.session_id = s.id
+        WHERE s.id = :sid
+        GROUP BY s.id, u.username
+    """
+    row = await database.fetch_one(query, values={"sid": session_id})
+    return dict(row) if row else None
+
+
+async def update_user_max_tokens(user_id: int, max_tokens: int):
+    await database.execute(
+        "UPDATE users SET max_daily_tokens = :v WHERE id = :id",
+        values={"v": max_tokens, "id": user_id}
+    )

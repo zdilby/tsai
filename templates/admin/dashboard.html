@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>TSAI 管理后台</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/static/images/favicon.png">
+    <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+<nav class="admin-nav">
+    <div class="nav-wrapper">
+        <span class="brand-text">TSAI 管理后台</span>
+        <span class="admin-badge">{{ admin.username }}</span>
+    </div>
+</nav>
+<div class="admin-container">
+    <h5 class="section-title">用户列表</h5>
+    <table class="striped responsive-table">
+        <thead>
+            <tr>
+                <th>用户名</th>
+                <th>今日 Token</th>
+                <th>累计 Token</th>
+                <th>每日上限</th>
+                <th>Sessions</th>
+                <th>注册时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for u in users %}
+            <tr>
+                <td><a href="/admin/user/{{ u.id }}">{{ u.username }}</a></td>
+                <td>{{ u.today_tokens | int }}</td>
+                <td>{{ u.total_tokens | int }}</td>
+                <td>
+                    <span class="max-token-val" data-uid="{{ u.id }}" data-raw="{{ u.max_daily_tokens or 0 }}">
+                        {%- if not u.max_daily_tokens %}无限制{% else %}{{ u.max_daily_tokens }}{% endif -%}
+                    </span>
+                    <a class="edit-max-token-btn" data-uid="{{ u.id }}" title="修改上限">✏️</a>
+                </td>
+                <td>{{ u.session_count }}</td>
+                <td>{{ u.created_at.strftime('%Y-%m-%d') if u.created_at else '' }}</td>
+                <td><a href="/admin/user/{{ u.id }}" class="btn-small teal lighten-1 waves-effect">详情</a></td>
+            </tr>
+        {% else %}
+            <tr><td colspan="7" style="text-align:center;color:#aaa;">暂无用户</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div id="edit-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+        <h6>修改每日 Token 上限</h6>
+        <p id="edit-modal-label"></p>
+        <label class="unlimited-row">
+            <input type="checkbox" id="unlimited-check">
+            <span>无限制</span>
+        </label>
+        <input type="number" id="max-token-input" min="1" step="1000" placeholder="输入具体数值">
+        <div class="modal-actions">
+            <button id="modal-cancel-btn" class="btn-flat waves-effect">取消</button>
+            <button id="modal-save-btn" class="btn teal waves-effect">保存</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/js/jquery/jquery-3.6.4.min.js"></script>
+<script>
+let _editUid = null;
+
+$('.edit-max-token-btn').on('click', function () {
+    _editUid = $(this).data('uid');
+    const raw = parseInt($(`.max-token-val[data-uid="${_editUid}"]`).data('raw'));
+    const isUnlimited = !raw || raw === 0;
+    $('#edit-modal-label').text(`用户 ID: ${_editUid}`);
+    $('#unlimited-check').prop('checked', isUnlimited);
+    $('#max-token-input').val(isUnlimited ? '' : raw).prop('disabled', isUnlimited);
+    $('#edit-modal').show();
+});
+
+$('#unlimited-check').on('change', function () {
+    $('#max-token-input').prop('disabled', this.checked).val(this.checked ? '' : '');
+});
+
+$('#modal-cancel-btn').on('click', () => $('#edit-modal').hide());
+
+$('#modal-save-btn').on('click', async function () {
+    const unlimited = $('#unlimited-check').is(':checked');
+    const val = unlimited ? 0 : parseInt($('#max-token-input').val());
+    if (!unlimited && (isNaN(val) || val < 1)) return;
+    const fd = new FormData();
+    fd.append('max_tokens', val);
+    const resp = await fetch(`/admin/user/${_editUid}/max_tokens`, { method: 'POST', body: fd, credentials: 'include' });
+    const data = await resp.json();
+    if (data.success) {
+        const $span = $(`.max-token-val[data-uid="${_editUid}"]`);
+        $span.data('raw', val).text(val === 0 ? '无限制' : val);
+        $('#edit-modal').hide();
+    }
+});
+
+$('#edit-modal').on('click', function (e) {
+    if ($(e.target).is('#edit-modal')) $(this).hide();
+});
+</script>
+</body>
+</html>

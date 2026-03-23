@@ -80,13 +80,13 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
     token = create_access_token({"sub": user["username"]})
-    resp = JSONResponse({"msg": "ok"})
+    resp = JSONResponse({"msg": "ok", "is_admin": bool(user["is_admin"])})
     resp.set_cookie(
         key="access_token",
         value=token,
-        httponly=True,   # JS 无法读取，防止 XSS
-        secure=True,     # 生产环境必须 https
-        samesite="lax"   # 或 'strict'
+        httponly=True,
+        secure=True,
+        samesite="lax"
     )
     return resp
 
@@ -116,3 +116,36 @@ async def get_current_user(request: Request = None):
     if user is None:
         raise HTTPException(status_code=401, detail="用户不存在")
     return user
+
+
+# ---------------- 依赖：验证管理员 ----------------
+async def get_current_admin(request: Request = None):
+    user = await get_current_user(request)
+    if not user["is_admin"]:
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
+# ---------------- 退出登录 ----------------
+@router.post("/logout")
+async def logout():
+    resp = JSONResponse({"msg": "ok"})
+    resp.delete_cookie("access_token")
+    return resp
+
+
+# ---------------- 修改密码 ----------------
+@router.post("/change_password")
+async def change_password(
+    old_password: str = Form(...),
+    new_password: str = Form(...),
+    user=Depends(get_current_user)
+):
+    if not pwd_context.verify(old_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="原密码错误")
+    new_hash = pwd_context.hash(new_password)
+    await database.execute(
+        "UPDATE users SET password_hash = :h WHERE id = :id",
+        values={"h": new_hash, "id": user["id"]}
+    )
+    return JSONResponse({"msg": "密码已修改"})

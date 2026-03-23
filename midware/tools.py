@@ -3,6 +3,7 @@ import aiohttp
 import os
 import io
 import re
+import tempfile
 from pathlib import Path
 from fastapi import UploadFile, HTTPException
 from docx import Document
@@ -10,6 +11,152 @@ import pdfplumber
 import docx2txt
 from settings import settings
 from typing import List
+
+
+# ── PDF OCR 标题检测（参考 PDFconvert）────────────────────────
+
+# 中文句子结尾标点，出现则不视为标题
+_SENTENCE_ENDINGS = re.compile(r'[。，；：、！？,.;:!?…]$')
+
+# 典型中文标题前缀：第X章/节、一、（一）、1. 等
+_HEADING_PREFIX = re.compile(
+    r'^(第[一二三四五六七八九十百]+[章节条款]|[一二三四五六七八九十]+[、．.]|\d+[.、）)]\s*|（[一二三四五六七八九十]+）)'
+)
+
+
+def _is_heading(line: str) -> bool:
+    """判断一行文本是否为标题（规则来自 PDFconvert）。"""
+    if _HEADING_PREFIX.match(line):
+        return True
+    if len(line) < 25 and not _SENTENCE_ENDINGS.search(line):
+        return True
+    return False
+
+
+def _text_to_markdown(text: str) -> str:
+    """将 OCR 原始文本转换为带 ## 标题标记的 Markdown 字符串。"""
+    lines = text.split("\n")
+    md = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if _is_heading(line):
+            md.append("## " + line)
+        else:
+            md.append(line)
+    return "\n\n".join(md)
+
+
+def _pdf_to_markdown_sync(pdf_path: Path) -> str:
+    """
+    同步 PDF → Markdown 转换（300 DPI OCR，支持中英文）。
+    在线程池中调用，避免阻塞事件循环。
+    """
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+    except ImportError as e:
+        raise RuntimeError(
+            f"PDF OCR 依赖未安装: {e}。请运行: pip install pdf2image pytesseract"
+        ) from e
+
+    images = convert_from_path(str(pdf_path), dpi=300)
+    text = ""
+    for img in images:
+        t = pytesseract.image_to_string(img, lang="chi_sim+eng")
+        text += t + "\n"
+    return _text_to_markdown(text)
+
+
+async def pdf_to_markdown(pdf_path: Path) -> str:
+    """异步包装：在线程池中执行 PDF OCR 转换，返回 Markdown 文本。"""
+    return await asyncio.to_thread(_pdf_to_markdown_sync, pdf_path)
+
+
+def _epub_to_markdown_sync(epub_path: Path) -> str:
+    """
+    同步 epub → Markdown 转换：提取各章节 HTML，将 h1-h6 转为 ## 标题。
+    在线程池中调用，避免阻塞事件循环。
+    """
+    try:
+        import ebooklib
+        from ebooklib import epub as epublib
+    except ImportError as e:
+        raise RuntimeError(
+            f"epub 依赖未安装: {e}。请运行: pip install ebooklib"
+        ) from e
+
+    from html.parser import HTMLParser
+
+    class _EpubHTMLParser(HTMLParser):
+        _HEADING = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
+        _BLOCK   = {'p', 'div', 'li', 'td', 'th'}
+
+        def __init__(self):
+            super().__init__()
+            self._buf = []
+            self._in_heading = False
+
+        def handle_starttag(self, tag, attrs):
+            tag = tag.lower()
+            if tag in self._HEADING:
+                self._buf.append('\n## ')
+                self._in_heading = True
+            elif tag == 'br':
+                self._buf.append('\n')
+            elif tag in self._BLOCK:
+                self._buf.append('\n')
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if tag in self._HEADING:
+                self._buf.append('\n')
+                self._in_heading = False
+            elif tag in self._BLOCK:
+                self._buf.append('\n')
+
+        def handle_data(self, data):
+            self._buf.append(data)
+
+        def result(self):
+            return ''.join(self._buf)
+
+    book = epublib.read_epub(str(epub_path), options={'ignore_ncx': True})
+    parts = []
+    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+        raw_html = item.get_content().decode('utf-8', errors='ignore')
+        parser = _EpubHTMLParser()
+        parser.feed(raw_html)
+        parts.append(parser.result())
+
+    md = '\n\n'.join(parts)
+    md = re.sub(r'\n{3,}', '\n\n', md)
+    return md.strip()
+
+
+async def epub_to_markdown(epub_path: Path) -> str:
+    """异步包装：在线程池中执行 epub → Markdown 转换。"""
+    return await asyncio.to_thread(_epub_to_markdown_sync, epub_path)
+
+
+def split_markdown_chunks(md_text: str, max_size: int = 800) -> List[str]:
+    """
+    按 ## 标题边界拆分 Markdown 为语义 chunks。
+    超长 section 再按段落细分，确保每块不超过 max_size 字符。
+    """
+    sections = re.split(r'(?=^## )', md_text, flags=re.MULTILINE)
+    chunks = []
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        if len(section) <= max_size:
+            chunks.append(section)
+        else:
+            sub_paragraphs = split_into_paragraphs(section)
+            chunks.extend(group_paragraphs(sub_paragraphs, max_size=max_size))
+    return chunks
 
 
 # 使用 Google Search 获取最新网络信息
@@ -21,19 +168,24 @@ async def fetch_from_web(query: str):
         "q": query,
         "num": 5  # 获取前5个结果
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(search_url, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
-                results = []
-                for item in data.get("items", []):
-                    title = item.get("title")
-                    snippet = item.get("snippet")
-                    link = item.get("link")
-                    results.append(f"Title: {title}\nSnippet: {snippet}\nLink: {link}")
-                return "\n\n".join(results)
-            else:
-                return ""
+    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, params=params, proxy=proxy,
+                                   timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    results = []
+                    for item in data.get("items", []):
+                        title = item.get("title")
+                        snippet = item.get("snippet")
+                        link = item.get("link")
+                        results.append(f"Title: {title}\nSnippet: {snippet}\nLink: {link}")
+                    return "\n\n".join(results)
+                else:
+                    return ""
+    except Exception:
+        return ""
 
 
 # ── 文档解析 ──────────────────────────────────────────────────
@@ -61,6 +213,9 @@ def _parse_document_sync(path: Path) -> str:
             for page in pdf.pages:
                 pages.append(page.extract_text() or "")
         return "\n".join(pages)
+    elif suffix == ".epub":
+        # epub 走 Markdown 路径，此处提供纯文本兜底
+        return _epub_to_markdown_sync(path)
     else:
         raise HTTPException(status_code=400, detail="暂不支持该文件格式")
 
@@ -99,13 +254,26 @@ async def enrich_chunks_with_context(client, doc_text: str, filename: str, chunk
     用 1 次 Gemini 调用生成文档摘要，然后为每个 chunk 拼接上下文头。
     enriched chunk = [来源+摘要+位置头] + 原始 chunk 文本
     """
+    from settings import logger
     summary_prompt = (
         f"请用1-2句话概括以下文档的主要内容和主题，输出简洁精准的描述：\n\n{doc_text[:3000]}"
     )
-    resp = await client.aio.models.generate_content(
-        model=settings.generation_model,
-        contents=summary_prompt
-    )
+    for attempt in range(6):
+        try:
+            resp = await client.aio.models.generate_content(
+                model=settings.generation_model,
+                contents=summary_prompt
+            )
+            break
+        except Exception as e:
+            if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
+                wait = 30 * (2 ** attempt)
+                logger.warning("摘要生成触发限流，%ds 后重试 (第 %d 次)", wait, attempt + 1)
+                await asyncio.sleep(wait)
+            else:
+                raise
+    else:
+        raise RuntimeError("摘要生成超过最大重试次数")
     doc_summary = resp.text.strip()
 
     enriched = []

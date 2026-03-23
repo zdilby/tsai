@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>用户详情 · TSAI 管理后台</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/static/images/favicon.png">
+    <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+<nav class="admin-nav">
+    <div class="nav-wrapper">
+        <a href="/admin" class="back-link">← 返回</a>
+        <span class="brand-text">用户「{{ profile.username }}」详情</span>
+        <span class="admin-badge">{{ admin.username }}</span>
+    </div>
+</nav>
+<div class="admin-container">
+
+    <div class="row">
+        <div class="col s12 m6">
+            <div class="stat-card">
+                <div class="stat-label">累计 Token</div>
+                <div class="stat-value">{{ sessions | sum(attribute='total_tokens') | int }}</div>
+            </div>
+        </div>
+        <div class="col s12 m6">
+            <div class="stat-card">
+                <div class="stat-label">每日上限</div>
+                <div class="stat-value">{{ profile.max_daily_tokens or '无限制' }}</div>
+            </div>
+        </div>
+    </div>
+
+    <h5 class="section-title">每日 Token 使用（近 30 天）</h5>
+    {% if daily %}
+    <table class="striped responsive-table compact-table">
+        <thead><tr><th>日期</th><th>Token 用量</th></tr></thead>
+        <tbody>
+        {% for d in daily %}
+            <tr><td>{{ d.date }}</td><td>{{ d.tokens | int }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-tip">暂无数据</p>
+    {% endif %}
+
+    <h5 class="section-title" style="margin-top:2em;">Sessions 列表</h5>
+    {% if sessions %}
+    <table class="striped responsive-table">
+        <thead>
+            <tr><th>Session 名称</th><th>消息数</th><th>Token 用量</th><th>创建时间</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+        {% for s in sessions %}
+            <tr>
+                <td>{{ s.name }}</td>
+                <td>{{ s.message_count }}</td>
+                <td>{{ s.total_tokens | int }}</td>
+                <td>{{ s.created_at.strftime('%Y-%m-%d') if s.created_at else '' }}</td>
+                <td><a href="/admin/session/{{ s.id }}" class="btn-small teal lighten-1 waves-effect">查看</a></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-tip">该用户暂无 Session</p>
+    {% endif %}
+</div>
+</body>
+</html>

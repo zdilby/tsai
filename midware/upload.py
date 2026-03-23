@@ -7,7 +7,10 @@ from settings import settings, client, logger
 from account import get_current_user
 from backend.db import session_exists, save_file, add_knowledge_batch, update_file_status, get_file_statuses
 from backend.rag import get_embeddings_batch
-from midware.tools import parse_document, split_into_paragraphs, group_paragraphs, enrich_chunks_with_context
+from midware.tools import (
+    parse_document, split_into_paragraphs, group_paragraphs,
+    enrich_chunks_with_context, pdf_to_markdown, epub_to_markdown, split_markdown_chunks,
+)
 
 router = APIRouter()
 
@@ -47,20 +50,46 @@ async def process_file_and_insert(file_path: Path, session_id: str):
     try:
         await update_file_status(session_id, file_path.name, 'processing')
 
-        # 1. 非阻塞文档解析
-        text = await parse_document(file_path)
+        suffix = file_path.suffix.lower()
 
-        # 2. 语义感知分块
-        raw_chunks = group_paragraphs(split_into_paragraphs(text))
+        if suffix == '.pdf':
+            # ── PDF：OCR 智能解析 → Markdown ─────────────────────
+            logger.info("PDF OCR 解析开始: %s", file_path.name)
+            md_text = await pdf_to_markdown(file_path)
+
+            # 将生成的 Markdown 保存到同目录（filename.md）
+            md_path = file_path.with_suffix('.md')
+            await asyncio.to_thread(md_path.write_text, md_text, 'utf-8')
+            logger.info("Markdown 已保存: %s", md_path.name)
+
+            # 按标题边界拆分为语义 chunks
+            raw_chunks = split_markdown_chunks(md_text)
+            text = md_text  # 用于 Gemini 摘要生成
+        elif suffix == '.epub':
+            # ── EPUB：章节结构解析 → Markdown ────────────────────
+            logger.info("EPUB 解析开始: %s", file_path.name)
+            md_text = await epub_to_markdown(file_path)
+
+            md_path = file_path.with_suffix('.md')
+            await asyncio.to_thread(md_path.write_text, md_text, 'utf-8')
+            logger.info("Markdown 已保存: %s", md_path.name)
+
+            raw_chunks = split_markdown_chunks(md_text)
+            text = md_text
+        else:
+            # ── 其他格式：原有段落分块流程 ────────────────────────
+            text = await parse_document(file_path)
+            raw_chunks = group_paragraphs(split_into_paragraphs(text))
+
         await update_file_status(session_id, file_path.name, 'processing', total=len(raw_chunks))
 
-        # 3. Gemini 上下文增强（1次摘要调用）
+        # Gemini 上下文增强（1次摘要调用）
         enriched_chunks = await enrich_chunks_with_context(client, text, file_path.name, raw_chunks)
 
-        # 4. 批量并发 embedding
+        # 批量并发 embedding
         embeddings = await get_embeddings_batch(client, enriched_chunks)
 
-        # 5. 批量写入（单连接，单次 register_vector，executemany）
+        # 批量写入（单连接，单次 register_vector，executemany）
         items = list(zip(enriched_chunks, raw_chunks, embeddings))
         await add_knowledge_batch(items, session_id, source_file=file_path.name)
 
