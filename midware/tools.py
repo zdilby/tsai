@@ -59,7 +59,7 @@ def _pdf_to_markdown_sync(pdf_path: Path) -> str:
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
             pages_text = [p.extract_text() or "" for p in pdf.pages]
-        full_text = "\n".join(pages_text).strip()
+        full_text = "\n".join(pages_text).replace('\x00', '').strip()
         avg_chars = len(full_text) / max(len(pages_text), 1)
         if avg_chars >= 50:   # 每页至少 50 字符，认为是文字型 PDF
             logger.info("PDF 文字提取成功（均 %.0f 字/页）: %s", avg_chars, pdf_path.name)

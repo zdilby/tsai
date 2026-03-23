@@ -161,7 +161,7 @@ async def add_knowledge_batch(
     async with database._backend._pool.acquire() as conn:
         await register_vector(conn)
         await conn.executemany(query, [
-            (enriched, original, Vector(emb), session_id, source_file, idx)
+            (enriched.replace('\x00', ''), original.replace('\x00', ''), Vector(emb), session_id, source_file, idx)
             for idx, (enriched, original, emb) in enumerate(items)
         ])
 
