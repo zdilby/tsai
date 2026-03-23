@@ -65,8 +65,8 @@ async def main():
 
         # 2. 清除 knowledge_base 中该文件的残留向量
         result = await database.execute(
-            "DELETE FROM knowledge_base WHERE session_id = :sid AND source_file = :fn",
-            values={"sid": str(session_id), "fn": filename}
+            "DELETE FROM knowledge_base WHERE session_id = :sid AND source_file = :src",
+            values={"sid": str(session_id), "src": filename}
         )
         kb_count = result if isinstance(result, int) else 0
         if kb_count:
@@ -75,8 +75,8 @@ async def main():
 
         # 3. 删除 upload_files 记录
         await database.execute(
-            "DELETE FROM upload_files WHERE session_id = :sid AND filename = :fn",
-            values={"sid": str(session_id), "fn": filename}
+            "DELETE FROM upload_files WHERE session_id = :sid AND filename = :fname",
+            values={"sid": str(session_id), "fname": filename}
         )
         deleted_records += 1
 
