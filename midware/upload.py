@@ -53,41 +53,38 @@ async def process_file_and_insert(file_path: Path, session_id: str):
         suffix = file_path.suffix.lower()
 
         if suffix == '.pdf':
-            # ── PDF：OCR 智能解析 → Markdown ─────────────────────
-            logger.info("PDF OCR 解析开始: %s", file_path.name)
+            logger.info("PDF 解析开始: %s", file_path.name)
             md_text = await pdf_to_markdown(file_path)
-
-            # 将生成的 Markdown 保存到同目录（filename.md）
             md_path = file_path.with_suffix('.md')
             await asyncio.to_thread(md_path.write_text, md_text, 'utf-8')
-            logger.info("Markdown 已保存: %s", md_path.name)
-
-            # 按标题边界拆分为语义 chunks
+            logger.info("PDF 文本提取完成: %s (%d 字)", file_path.name, len(md_text))
             raw_chunks = split_markdown_chunks(md_text)
-            text = md_text  # 用于 Gemini 摘要生成
+            text = md_text
         elif suffix == '.epub':
-            # ── EPUB：章节结构解析 → Markdown ────────────────────
             logger.info("EPUB 解析开始: %s", file_path.name)
             md_text = await epub_to_markdown(file_path)
-
             md_path = file_path.with_suffix('.md')
             await asyncio.to_thread(md_path.write_text, md_text, 'utf-8')
-            logger.info("Markdown 已保存: %s", md_path.name)
-
+            logger.info("EPUB 解析完成: %s (%d 字)", file_path.name, len(md_text))
             raw_chunks = split_markdown_chunks(md_text)
             text = md_text
         else:
-            # ── 其他格式：原有段落分块流程 ────────────────────────
             text = await parse_document(file_path)
             raw_chunks = group_paragraphs(split_into_paragraphs(text))
+            logger.info("文档解析完成: %s (%d 字)", file_path.name, len(text))
 
+        logger.info("分块完成: %s (%d chunks)", file_path.name, len(raw_chunks))
         await update_file_status(session_id, file_path.name, 'processing', total=len(raw_chunks))
 
         # Gemini 上下文增强（1次摘要调用）
+        logger.info("Gemini 上下文增强开始: %s", file_path.name)
         enriched_chunks = await enrich_chunks_with_context(client, text, file_path.name, raw_chunks)
+        logger.info("Gemini 上下文增强完成: %s", file_path.name)
 
-        # 批量并发 embedding
+        # 批量 embedding
+        logger.info("Embedding 开始: %s (%d chunks)", file_path.name, len(enriched_chunks))
         embeddings = await get_embeddings_batch(embed_client, enriched_chunks)
+        logger.info("Embedding 完成: %s", file_path.name)
 
         # 批量写入（单连接，单次 register_vector，executemany）
         items = list(zip(enriched_chunks, raw_chunks, embeddings))
