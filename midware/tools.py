@@ -9,7 +9,7 @@ from fastapi import UploadFile, HTTPException
 from docx import Document
 import pdfplumber
 import docx2txt
-from settings import settings
+from settings import settings, logger
 from typing import List
 
 
@@ -184,7 +184,8 @@ async def fetch_from_web(query: str):
                     return "\n\n".join(results)
                 else:
                     return ""
-    except Exception:
+    except Exception as e:
+        logger.warning("Web 搜索失败: %s", e)
         return ""
 
 

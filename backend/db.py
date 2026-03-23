@@ -32,8 +32,14 @@ async def init_db():
             session_id UUID,
             role TEXT,
             content TEXT,
+            tokens_in INTEGER DEFAULT 0,
+            tokens_out INTEGER DEFAULT 0,
+            tokens_total INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT NOW()
         )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)
     """)
     # 创建 upload_files 表
     await database.execute("""
@@ -86,6 +92,8 @@ async def init_account_tables():
             id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            is_admin BOOLEAN DEFAULT FALSE,
+            max_daily_tokens INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)

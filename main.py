@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 from google import genai
 from google.genai import types
 from pgvector.asyncpg import register_vector, Vector
+import asyncio
 import uuid
 from settings import settings, client, embed_client
 from account import router as account_router, get_current_user
@@ -75,12 +76,15 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
     # print('message: ', message)
 
     # 获取历史上下文
-    context = await get_context(session_id)
+    context = await get_context(session_id, limit=settings.max_history_turns)
     context_text = "\n".join([f"{c['role']}: {c['content']}" for c in context])
 
-    # RAG 查询（如果前端指定了书籍则只查指定书）
+    # embedding、RAG 查询、Web 搜索并发执行
     source_list = [s.strip() for s in source_files.split(',') if s.strip()] if source_files else None
-    query_embedding = await get_embedding(embed_client, message)
+    query_embedding, web_info = await asyncio.gather(
+        get_embedding(embed_client, message),
+        fetch_from_web(message),
+    )
     rag_results = await query_rag(query_embedding, session_id=session_id, source_files=source_list)
     rag_text = "\n".join([r["content"] for r in rag_results])
     rag_citations = [
@@ -92,9 +96,6 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
         }
         for r in rag_results if r.get("source_file")
     ]
-
-    # 执行 Google 搜索获取最新网络信息（不再写入 knowledge_base，避免污染 RAG 向量空间）
-    web_info = await fetch_from_web(message)
 
     # 构建提示词 prompt
     rag_section = (
