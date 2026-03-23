@@ -69,7 +69,12 @@ async def index(request: Request, session_id: str = Query(None), user=Depends(ge
         session_id = str(uuid.uuid4())
         await new_null_session(session_id, user["id"])
         session_ex = False
-    return templates.TemplateResponse("chat.html", {"request": request, "session_id": session_id, "session_exists": session_ex, "user": user["username"]})
+    max_file_mb = user["max_file_size_mb"] if user["max_file_size_mb"] is not None else 10
+    return templates.TemplateResponse("chat.html", {
+        "request": request, "session_id": session_id,
+        "session_exists": session_ex, "user": user["username"],
+        "max_file_size_mb": max_file_mb,
+    })
 
 
 @app.get("/ping")

@@ -1,4 +1,14 @@
 const session_id = $('#session-id').val();
+const _maxFileSizeMb = parseInt($('#max-file-size-mb').val()) || 0;
+
+function checkFileSize(file) {
+    if (_maxFileSizeMb > 0 && file.size > _maxFileSizeMb * 1024 * 1024) {
+        const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+        M.toast({ html: `文件 ${file.name}（${sizeMb}MB）超过上限 ${_maxFileSizeMb}MB，无法上传`, classes: 'red lighten-2', displayLength: 4000 });
+        return false;
+    }
+    return true;
+}
 const $chatBox = $("#chat-box");
 
 // ── @ 书籍提及 ────────────────────────────────────────────────
@@ -496,7 +506,10 @@ $(function () {
     });
     $('#input-btn').on('click', function() {$('#input-form').submit();});
     $('#upload-btn').on('click', function() {$('#file-input').click();});
-    $('#file-input').on('change', function() {$('#upload-form').submit();});
+    $('#file-input').on('change', function() {
+        if (this.files[0] && !checkFileSize(this.files[0])) { this.value = ''; return; }
+        $('#upload-form').submit();
+    });
     $('.modal').modal();
     $('#modal-upload-form').on('submit', async function (e) {
         e.preventDefault();
@@ -589,7 +602,10 @@ $(function () {
         }
     });
     $('#tablechat-confirm-btn').on('click', function() {$('#modal-file-input').click();});
-    $('#modal-file-input').on('change', function() {$('#modal-upload-form').submit();});
+    $('#modal-file-input').on('change', function() {
+        if (this.files[0] && !checkFileSize(this.files[0])) { this.value = ''; return; }
+        $('#modal-upload-form').submit();
+    });
 
     // 代码块复制按钮（事件委托，适用于动态插入的内容）
     $(document).on('click', '.copy-code-btn', function () {

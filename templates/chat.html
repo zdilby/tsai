@@ -42,6 +42,7 @@
             <form id="input-form">
                 <div id="message-input" contenteditable="true" data-placeholder="输入消息，@ 可指定书籍…"></div>
                 <input type="hidden" id="session-id" value="{{ session_id }}">
+                <input type="hidden" id="max-file-size-mb" value="{{ max_file_size_mb }}">
             </form>
             <form id="upload-form" style="display:none;">
                 <input type="file" id="file-input" name="file" accept=".txt,.pdf,.docx,.epub">
