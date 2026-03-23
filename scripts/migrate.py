@@ -13,6 +13,24 @@ from backend.db import database
 
 
 MIGRATIONS = [
+    # upload_files 表：新增文件处理状态字段
+    ("upload_files.status",
+     "ALTER TABLE upload_files ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'"),
+    ("upload_files.total_chunks",
+     "ALTER TABLE upload_files ADD COLUMN IF NOT EXISTS total_chunks INTEGER DEFAULT 0"),
+    ("upload_files.processed_chunks",
+     "ALTER TABLE upload_files ADD COLUMN IF NOT EXISTS processed_chunks INTEGER DEFAULT 0"),
+    ("upload_files.error_msg",
+     "ALTER TABLE upload_files ADD COLUMN IF NOT EXISTS error_msg TEXT"),
+
+    # knowledge_base 表：新增语义分块相关字段
+    ("knowledge_base.original_content",
+     "ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS original_content TEXT"),
+    ("knowledge_base.source_file",
+     "ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS source_file TEXT"),
+    ("knowledge_base.chunk_index",
+     "ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0"),
+
     # messages 表：新增 token 统计字段
     ("messages.tokens_in",
      "ALTER TABLE messages ADD COLUMN IF NOT EXISTS tokens_in INTEGER DEFAULT 0"),
@@ -26,14 +44,6 @@ MIGRATIONS = [
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE"),
     ("users.max_daily_tokens",
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daily_tokens INTEGER DEFAULT 0"),
-
-    # knowledge_base 表：新增语义分块相关字段
-    ("knowledge_base.original_content",
-     "ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS original_content TEXT"),
-    ("knowledge_base.source_file",
-     "ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS source_file TEXT"),
-    ("knowledge_base.chunk_index",
-     "ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0"),
 ]
 
 
