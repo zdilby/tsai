@@ -7,7 +7,7 @@ from google.genai import types
 from pgvector.asyncpg import register_vector, Vector
 import asyncio
 import uuid
-from settings import settings, client, embed_client
+from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
 from backend.db import database, init_db, save_message, get_context, session_exists, add_knowledge, get_user_today_tokens
 from backend.rag import get_embedding, query_rag
@@ -94,7 +94,7 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
             "score": round(1 - r["distance"], 3),
             "snippet": (r.get("original_content") or "")[:200].strip(),
         }
-        for r in rag_results if r.get("source_file")
+        for r in rag_results
     ]
 
     # 构建提示词 prompt
@@ -119,7 +119,11 @@ async def chat(session_id: str = Form(...), message: str = Form(...),
 
     # 调用 Gemini 生成回答
     chat = client.aio.chats.create(model=settings.generation_model, config=config)
-    resp = await chat.send_message(prompt)
+    try:
+        resp = await chat.send_message(prompt)
+    except Exception as e:
+        logger.exception("Gemini API 调用失败: %s", e)
+        raise HTTPException(status_code=502, detail="AI 服务暂时不可用，请稍后重试")
     answer = resp.text
     usage = resp.usage_metadata
     tokens_in  = getattr(usage, "prompt_token_count",     0) or 0

@@ -27,7 +27,7 @@ async def upload_file(
 
     upload_dir: Path = settings.base_dir / "static" / "loads" / user["username"] / session_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    file_path: Path = upload_dir / file.filename
+    file_path: Path = upload_dir / Path(file.filename).name
     if file_path.exists():
         return JSONResponse({"status": "success", "message": f"{file.filename} 已存在，无需重复上传"})
 

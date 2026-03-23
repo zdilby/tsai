@@ -282,10 +282,13 @@ async function loadCollections(id) {
             });
         }
 
-        // 仍有文件在处理中则自动刷新（每4秒，直到模态框关闭）
-        const hasActive = statuses.some(s => s.status === 'pending' || s.status === 'processing');
-        if (hasActive && $('#table-chat-modal').hasClass('open')) {
-            _collectionsRefreshTimer = setTimeout(() => loadCollections(id), 4000);
+        // 仍有文件在处理中则自动刷新（processing 时 2 秒，pending 时 5 秒），全部完成则停止
+        const hasProcessing = statuses.some(s => s.status === 'processing');
+        const hasPending    = statuses.some(s => s.status === 'pending');
+        if ((hasProcessing || hasPending) && $('#table-chat-modal').hasClass('open')) {
+            _collectionsRefreshTimer = setTimeout(() => loadCollections(id), hasProcessing ? 2000 : 5000);
+        } else if (!hasProcessing && !hasPending && statuses.length > 0 && $('#table-chat-modal').hasClass('open')) {
+            M.toast({ html: '所有文件处理完毕', classes: 'teal' });
         }
     } catch (err) {
         const $collectList = $("#collect-modal");
