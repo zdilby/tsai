@@ -178,7 +178,8 @@ table a { color: #00897b; }
 .unlimited-row input[type=checkbox] {
     width: 16px; height: 16px; cursor: pointer;
 }
-.modal-box input[type=number] {
+.modal-box input[type=number],
+.modal-box input[type=password] {
     width: 100%; padding: 8px; border: 1px solid #ccc;
     border-radius: 4px; font-size: 1rem; margin: 4px 0 10px;
 }

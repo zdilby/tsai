@@ -43,13 +43,50 @@
                 </td>
                 <td>{{ u.session_count }}</td>
                 <td>{{ u.created_at.strftime('%Y-%m-%d') if u.created_at else '' }}</td>
-                <td><a href="/admin/user/{{ u.id }}" class="btn-small teal lighten-1 waves-effect">详情</a></td>
+                <td>
+                    <a href="/admin/user/{{ u.id }}" class="btn-small teal lighten-1 waves-effect">详情</a>
+                    <a class="btn-small blue lighten-1 waves-effect reset-pwd-btn"
+                       data-uid="{{ u.id }}" data-name="{{ u.username }}" style="margin-left:4px;">改密码</a>
+                </td>
             </tr>
         {% else %}
             <tr><td colspan="7" style="text-align:center;color:#aaa;">暂无用户</td></tr>
         {% endfor %}
         </tbody>
     </table>
+
+    <h5 class="section-title" style="margin-top:2em;">邀请码</h5>
+    <div style="margin-bottom:12px;">
+        <button id="gen-invite-btn" class="btn teal waves-effect waves-light btn-small">+ 生成新邀请码</button>
+    </div>
+    <table class="striped responsive-table compact-table" id="invite-table">
+        <thead><tr><th>邀请码</th><th>状态</th><th>使用者</th><th>创建时间</th><th>使用时间</th></tr></thead>
+        <tbody>
+        {% for c in invite_codes %}
+            <tr>
+                <td><code style="font-size:0.82rem;">{{ c.code }}</code></td>
+                <td>{% if c.used_by %}<span style="color:#c62828;">已使用</span>{% else %}<span style="color:#00796b;">未使用</span>{% endif %}</td>
+                <td>{{ c.used_by or '—' }}</td>
+                <td>{{ c.created_at.strftime('%Y-%m-%d %H:%M') if c.created_at else '' }}</td>
+                <td>{{ c.used_at.strftime('%Y-%m-%d %H:%M') if c.used_at else '—' }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="5" style="text-align:center;color:#aaa;">暂无邀请码</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div id="pwd-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+        <h6>修改用户密码</h6>
+        <p id="pwd-modal-label" style="font-size:0.9rem;color:#546e7a;margin-bottom:8px;"></p>
+        <input type="password" id="new-password-input" placeholder="输入新密码（至少 6 位）" autocomplete="new-password">
+        <div class="modal-actions">
+            <button id="pwd-cancel-btn" class="btn-flat waves-effect">取消</button>
+            <button id="pwd-save-btn" class="btn blue lighten-1 waves-effect">保存</button>
+        </div>
+    </div>
 </div>
 
 <div id="edit-modal" class="modal-overlay" style="display:none;">
@@ -105,6 +142,55 @@ $('#modal-save-btn').on('click', async function () {
 
 $('#edit-modal').on('click', function (e) {
     if ($(e.target).is('#edit-modal')) $(this).hide();
+});
+
+// 改密码
+let _pwdUid = null;
+$('.reset-pwd-btn').on('click', function () {
+    _pwdUid = $(this).data('uid');
+    const name = $(this).data('name');
+    $('#pwd-modal-label').text(`用户：${name}`);
+    $('#new-password-input').val('');
+    $('#pwd-modal').show();
+    setTimeout(() => $('#new-password-input').focus(), 50);
+});
+$('#pwd-cancel-btn').on('click', () => $('#pwd-modal').hide());
+$('#pwd-modal').on('click', function (e) {
+    if ($(e.target).is('#pwd-modal')) $(this).hide();
+});
+$('#pwd-save-btn').on('click', async function () {
+    const pwd = $('#new-password-input').val().trim();
+    if (pwd.length < 6) { alert('密码至少需要 6 位'); return; }
+    const fd = new FormData();
+    fd.append('new_password', pwd);
+    const resp = await fetch(`/admin/user/${_pwdUid}/reset_password`, { method: 'POST', body: fd, credentials: 'include' });
+    const data = await resp.json();
+    if (data.success) {
+        $('#pwd-modal').hide();
+        alert('密码已修改');
+    } else {
+        alert(data.detail || '修改失败');
+    }
+});
+
+// 生成邀请码
+$('#gen-invite-btn').on('click', async function () {
+    $(this).prop('disabled', true).text('生成中…');
+    const resp = await fetch('/admin/invite/generate', { method: 'POST', credentials: 'include' });
+    const data = await resp.json();
+    $(this).prop('disabled', false).text('+ 生成新邀请码');
+    if (data.success) {
+        const $tbody = $('#invite-table tbody');
+        if ($tbody.find('td[colspan]').length) $tbody.empty();
+        const today = new Date().toISOString().slice(0, 16).replace('T', ' ');
+        $tbody.prepend(`<tr>
+            <td><code style="font-size:0.82rem;">${data.code}</code></td>
+            <td><span style="color:#00796b;">未使用</span></td>
+            <td>—</td>
+            <td>${today}</td>
+            <td>—</td>
+        </tr>`);
+    }
 });
 </script>
 </body>

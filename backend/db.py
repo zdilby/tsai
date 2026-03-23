@@ -346,3 +346,24 @@ async def update_user_max_file_size(user_id: int, max_file_size_mb: int):
         "UPDATE users SET max_file_size_mb = :v WHERE id = :id",
         values={"v": max_file_size_mb, "id": user_id}
     )
+
+
+async def update_user_password(user_id: int, new_hash: str):
+    await database.execute(
+        "UPDATE users SET password_hash = :h WHERE id = :id",
+        values={"h": new_hash, "id": user_id}
+    )
+
+
+async def get_all_invite_codes() -> list:
+    rows = await database.fetch_all(
+        "SELECT code, used_by, created_at, used_at FROM invite_codes ORDER BY created_at DESC"
+    )
+    return [dict(r) for r in rows]
+
+
+async def create_invite_code(code: str):
+    await database.execute(
+        "INSERT INTO invite_codes (code) VALUES (:code)",
+        values={"code": code}
+    )
