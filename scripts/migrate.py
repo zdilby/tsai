@@ -44,6 +44,8 @@ MIGRATIONS = [
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE"),
     ("users.max_daily_tokens",
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daily_tokens INTEGER DEFAULT 200000"),
+    ("users.max_file_size_mb",
+     "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_file_size_mb INTEGER DEFAULT 10"),
 ]
 
 

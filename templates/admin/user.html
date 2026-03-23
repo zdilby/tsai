@@ -19,16 +19,30 @@
 <div class="admin-container">
 
     <div class="row">
-        <div class="col s12 m6">
+        <div class="col s12 m4">
             <div class="stat-card">
                 <div class="stat-label">累计 Token</div>
                 <div class="stat-value">{{ sessions | sum(attribute='total_tokens') | int }}</div>
             </div>
         </div>
-        <div class="col s12 m6">
+        <div class="col s12 m4">
             <div class="stat-card">
-                <div class="stat-label">每日上限</div>
+                <div class="stat-label">每日 Token 上限</div>
                 <div class="stat-value">{{ profile.max_daily_tokens or '无限制' }}</div>
+                <form class="admin-inline-form" onsubmit="postForm(event, '/admin/user/{{ profile.id }}/max_tokens', this)">
+                    <input type="number" name="max_tokens" min="0" placeholder="0=不限制" value="{{ profile.max_daily_tokens }}">
+                    <button type="submit" class="btn-small teal lighten-1 waves-effect">保存</button>
+                </form>
+            </div>
+        </div>
+        <div class="col s12 m4">
+            <div class="stat-card">
+                <div class="stat-label">文件大小上限（MB）</div>
+                <div class="stat-value">{{ profile.max_file_size_mb or '无限制' }}</div>
+                <form class="admin-inline-form" onsubmit="postForm(event, '/admin/user/{{ profile.id }}/max_file_size', this)">
+                    <input type="number" name="max_file_size_mb" min="0" placeholder="0=不限制" value="{{ profile.max_file_size_mb }}">
+                    <button type="submit" class="btn-small teal lighten-1 waves-effect">保存</button>
+                </form>
             </div>
         </div>
     </div>
@@ -69,5 +83,14 @@
     <p class="empty-tip">该用户暂无 Session</p>
     {% endif %}
 </div>
+<script>
+async function postForm(e, url, form) {
+    e.preventDefault();
+    const resp = await fetch(url, { method: 'POST', body: new FormData(form), credentials: 'include' });
+    const data = await resp.json();
+    if (data.success) { location.reload(); }
+    else { alert(data.detail || '保存失败'); }
+}
+</script>
 </body>
 </html>

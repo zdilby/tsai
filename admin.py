@@ -8,6 +8,7 @@ from backend.db import (
     get_user_sessions_with_stats, get_user_daily_tokens,
     get_session_messages_detail, get_session_daily_tokens,
     get_session_files, get_session_info, update_user_max_tokens,
+    update_user_max_file_size,
 )
 
 admin_router = APIRouter()
@@ -56,4 +57,14 @@ async def set_max_tokens(
     admin=Depends(get_current_admin)
 ):
     await update_user_max_tokens(user_id, max_tokens)
+    return JSONResponse({"success": True})
+
+
+@admin_router.post("/user/{user_id}/max_file_size")
+async def set_max_file_size(
+    user_id: int,
+    max_file_size_mb: int = Form(...),
+    admin=Depends(get_current_admin)
+):
+    await update_user_max_file_size(user_id, max_file_size_mb)
     return JSONResponse({"success": True})

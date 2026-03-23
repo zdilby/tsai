@@ -31,8 +31,18 @@ async def upload_file(
     if file_path.exists():
         return JSONResponse({"status": "success", "message": f"{file.filename} 已存在，无需重复上传"})
 
-    # 异步读取并写入文件，避免阻塞事件循环
+    # 异步读取文件内容
     content = await file.read()
+
+    # 检查文件大小限制（0 表示不限制）
+    max_mb = user.get("max_file_size_mb") or 10
+    if max_mb > 0 and len(content) > max_mb * 1024 * 1024:
+        size_mb = round(len(content) / 1024 / 1024, 1)
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件大小 {size_mb}MB 超过上限 {max_mb}MB"
+        )
+
     await asyncio.to_thread(file_path.write_bytes, content)
 
     relative_file_path: Path = Path("static") / "loads" / user["username"] / session_id / file.filename

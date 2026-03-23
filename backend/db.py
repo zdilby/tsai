@@ -94,6 +94,7 @@ async def init_account_tables():
             password_hash TEXT NOT NULL,
             is_admin BOOLEAN DEFAULT FALSE,
             max_daily_tokens INTEGER DEFAULT 200000,
+            max_file_size_mb INTEGER DEFAULT 10,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -314,4 +315,11 @@ async def update_user_max_tokens(user_id: int, max_tokens: int):
     await database.execute(
         "UPDATE users SET max_daily_tokens = :v WHERE id = :id",
         values={"v": max_tokens, "id": user_id}
+    )
+
+
+async def update_user_max_file_size(user_id: int, max_file_size_mb: int):
+    await database.execute(
+        "UPDATE users SET max_file_size_mb = :v WHERE id = :id",
+        values={"v": max_file_size_mb, "id": user_id}
     )
