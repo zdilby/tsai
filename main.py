@@ -19,7 +19,7 @@ _RECALL_PATTERNS = re.compile(
 )
 from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
-from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens
+from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens, get_session_persona, update_session_persona
 from backend.rag import get_embedding, query_rag, query_history
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
@@ -164,7 +164,11 @@ async def chat(background_tasks: BackgroundTasks,
 
     # 设置前置的Grounding with Google Search
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
-    config = types.GenerateContentConfig(tools=[grounding_tool])
+    persona = await get_session_persona(session_id)
+    config = types.GenerateContentConfig(
+        tools=[grounding_tool],
+        system_instruction=persona if persona else None,
+    )
 
     # 调用 Gemini 生成回答
     chat = client.aio.chats.create(model=settings.generation_model, config=config)
@@ -224,6 +228,22 @@ async def del_session(session_id: str = Form(...), user=Depends(get_current_user
         return {"id": session_id, "success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.get("/session_persona/{session_id}")
+async def get_persona(session_id: str, user=Depends(get_current_user)):
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    return JSONResponse({"persona": await get_session_persona(session_id)})
+
+
+@app.post("/session_persona")
+async def set_persona(session_id: str = Form(...), persona: str = Form(""),
+                      user=Depends(get_current_user)):
+    if not await session_owned_by(session_id, user["id"]):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    await update_session_persona(session_id, user["id"], persona)
+    return JSONResponse({"success": True})
 
 
 @app.post("/save_to_rag")

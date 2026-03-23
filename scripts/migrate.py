@@ -47,6 +47,10 @@ MIGRATIONS = [
     ("users.max_file_size_mb",
      "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_file_size_mb INTEGER DEFAULT 10"),
 
+    # sessions 表：新增 persona 字段（对话机器人性格设定）
+    ("sessions.persona",
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS persona TEXT"),
+
     # 统一新用户每日 Token 默认值为 100000（修正旧默认值 200000 或 NULL）
     ("users.max_daily_tokens.default",
      "ALTER TABLE users ALTER COLUMN max_daily_tokens SET DEFAULT 100000"),

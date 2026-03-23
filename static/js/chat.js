@@ -554,6 +554,7 @@ $(function () {
     $('#changechat-confirm-btn').on('click', async function () {
         const name = $('#changechat-name-input').val().trim();
         const modal_session_id = $('#modal-session-id').val();
+        const persona = $('#changechat-persona-input').val().trim();
         if (!name) {
             M.toast({ html: '请输入对话名称', classes: 'red lighten-2' });
             return;
@@ -563,13 +564,18 @@ $(function () {
             return;
         }
         try {
-            const formData = new FormData();
-            formData.append("name", name);
-            formData.append("session_id", modal_session_id);
-            const resp = await authFetch("/change_session", { method: "POST", body: formData});
-            const data = await resp.json();
-            if(data.success) {
-                $("change-chat-modal").modal('close'); // 关闭模态框
+            const nameForm = new FormData();
+            nameForm.append("name", name);
+            nameForm.append("session_id", modal_session_id);
+            const personaForm = new FormData();
+            personaForm.append("session_id", modal_session_id);
+            personaForm.append("persona", persona);
+            const [nameResp, personaResp] = await Promise.all([
+                authFetch("/change_session", { method: "POST", body: nameForm }),
+                authFetch("/session_persona", { method: "POST", body: personaForm }),
+            ]);
+            const data = await nameResp.json();
+            if (data.success) {
                 window.location.reload(true);
             } else {
                 M.toast({ html: '修改对话失败: ' + (data.error || '未知错误'), classes: 'red lighten-2' });
@@ -640,13 +646,21 @@ $(function () {
         $('#del-chat-modal').modal('open');
     });
     $('#slide-out').on('click', '.btn-floating.teal', async function (e) {
-        e.preventDefault();   // 阻止 <a href> 跳转
-        e.stopPropagation();  // 阻止事件冒泡到上层 <a>，避免触发波纹效果
+        e.preventDefault();
+        e.stopPropagation();
         const $a = $(this).closest('a[href]');
         const name = $a.find('.max-width-80').text().trim();
         const aId = $a.attr('id');
         $('#modal-session-id').val(aId);
         $('#changechat-name-input').val(name);
+        // 加载当前 persona
+        try {
+            const resp = await authFetch(`/session_persona/${aId}`);
+            const data = await resp.json();
+            $('#changechat-persona-input').val(data.persona || '');
+        } catch (e) {
+            $('#changechat-persona-input').val('');
+        }
         $('#change-chat-modal').modal('open');
     });
     $('#slide-out').on('click', '.btn-floating.blue', async function (e) {

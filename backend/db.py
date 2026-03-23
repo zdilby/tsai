@@ -19,6 +19,7 @@ async def init_db():
             id UUID PRIMARY KEY,
             user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             name TEXT,
+            persona TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -345,6 +346,21 @@ async def update_user_max_file_size(user_id: int, max_file_size_mb: int):
     await database.execute(
         "UPDATE users SET max_file_size_mb = :v WHERE id = :id",
         values={"v": max_file_size_mb, "id": user_id}
+    )
+
+
+async def get_session_persona(session_id: str) -> str:
+    row = await database.fetch_one(
+        "SELECT persona FROM sessions WHERE id = :sid",
+        values={"sid": session_id}
+    )
+    return (row["persona"] or "") if row else ""
+
+
+async def update_session_persona(session_id: str, user_id: int, persona: str):
+    await database.execute(
+        "UPDATE sessions SET persona = :persona WHERE id = :sid AND user_id = :uid",
+        values={"persona": persona.strip() or None, "sid": session_id, "uid": user_id}
     )
 
 
