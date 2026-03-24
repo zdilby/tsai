@@ -26,14 +26,15 @@ body {
     text-overflow: ellipsis;
 }
 
-/* 桌面端：flex 布局，侧边栏固定在左侧 */
+/* 桌面端：flex 布局，侧边栏强制可见（!important 覆盖 Materialize inline style） */
 @media only screen and (min-width: 993px) {
     body {
         display: flex;
     }
-    .sidenav.sidenav-fixed {
-        position: relative;
-        height: auto;
+    #slide-out {
+        position: relative !important;
+        transform: translateX(0) !important;
+        height: auto !important;
         flex: 0 0 260px;
         box-shadow: none;
         border-right: 1px solid #eee;
