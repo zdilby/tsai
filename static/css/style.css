@@ -15,7 +15,6 @@ h1,h2,h3,h4,h5,h6 {
 
 /* 整体布局：侧边栏 + 主内容 */
 body {
-    display: flex;
     min-height: 100vh;
     margin: 0;
 }
@@ -27,15 +26,32 @@ body {
     text-overflow: ellipsis;
 }
 
-/* Materialize 的 sidenav 默认是 absolute 定位，这里强制改为 flex 内部固定布局 */
-/* 侧边栏样式 */ 
-.sidenav.sidenav-fixed {
-    position: relative;
-    height: auto;
-    flex: 0 0 260px; /* 固定宽度 */
-    box-shadow: none; /* 可选，去掉浮动阴影 */
-    border-right: 1px solid #eee; /* 可选，视觉分隔 */
-    overflow: visible; /* 允许内容溢出显示 */
+/* 桌面端：flex 布局，侧边栏固定在左侧 */
+@media only screen and (min-width: 993px) {
+    body {
+        display: flex;
+    }
+    .sidenav.sidenav-fixed {
+        position: relative;
+        height: auto;
+        flex: 0 0 260px;
+        box-shadow: none;
+        border-right: 1px solid #eee;
+        overflow: visible;
+    }
+}
+
+/* 移动端汉堡按钮 */
+#sidenav-trigger {
+    display: none;
+    padding: 0 12px;
+    color: #ee6e73;
+    line-height: 64px;
+}
+@media only screen and (max-width: 992px) {
+    #sidenav-trigger {
+        display: block;
+    }
 }
 .sidenav li.active{
     background-color: #e57373e6;
@@ -182,6 +198,11 @@ ul.sidenav:not(.browser-default)>li {
     overflow-y: auto;
 	padding: 1.5em 3em;
 }
+@media only screen and (max-width: 600px) {
+    .chat-box {
+        padding: 1em 1em;
+    }
+}
 
 /* 消息样式 */
 .message {
@@ -220,6 +241,14 @@ ul.sidenav:not(.browser-default)>li {
     background: #ffffff;
     z-index: 10;
     position: relative;
+}
+@media only screen and (max-width: 600px) {
+    .input-box {
+        margin: 0.8em 1em;
+    }
+    .message {
+        max-width: 90%;
+    }
 }
 #input-form {
     display: flex;
@@ -506,6 +535,14 @@ ul.sidenav:not(.browser-default)>li {
     color: #888;
     font-size: 0.9em;
     margin: 0;
+}
+
+/* Firefox：textarea scrollHeight 不含 padding-bottom，需额外补高 */
+@supports (-moz-appearance: none) {
+    #newchat-persona-input,
+    #changechat-persona-input {
+        min-height: 180px !important;
+    }
 }
 
 /* 占位符样式 */
