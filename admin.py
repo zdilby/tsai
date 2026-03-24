@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+import asyncio
 import uuid
 
 from account import get_current_admin, pwd_context
 from backend.db import (
     get_all_users_with_stats, get_user_by_id,
-    get_user_sessions_with_stats, get_user_daily_tokens,
+    get_user_sessions_with_stats, get_user_daily_tokens, get_user_total_tokens,
     get_session_messages_detail, get_session_daily_tokens,
     get_session_files, get_session_info, update_user_max_tokens,
     update_user_max_file_size, update_user_password,
@@ -31,11 +32,15 @@ async def user_detail(request: Request, user_id: int, admin=Depends(get_current_
     profile = await get_user_by_id(user_id)
     if not profile:
         raise HTTPException(status_code=404, detail="用户不存在")
-    sessions = await get_user_sessions_with_stats(user_id)
-    daily = await get_user_daily_tokens(user_id)
+    sessions, daily, total_tokens = await asyncio.gather(
+        get_user_sessions_with_stats(user_id),
+        get_user_daily_tokens(user_id),
+        get_user_total_tokens(user_id),
+    )
     return templates.TemplateResponse("admin/user.html", {
         "request": request, "profile": profile,
-        "sessions": sessions, "daily": daily, "admin": admin,
+        "sessions": sessions, "daily": daily,
+        "total_tokens": total_tokens, "admin": admin,
     })
 
 

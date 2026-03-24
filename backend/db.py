@@ -238,11 +238,11 @@ async def get_user_today_tokens(user_id: int) -> int:
 async def get_all_users_with_stats() -> list:
     query = """
         SELECT u.id, u.username, u.is_admin, u.max_daily_tokens, u.created_at,
-               COUNT(DISTINCT s.id) AS session_count,
+               COUNT(DISTINCT CASE WHEN s.name IS NOT NULL THEN s.id END) AS session_count,
                COALESCE(SUM(m.tokens_total), 0) AS total_tokens,
                COALESCE(SUM(CASE WHEN DATE(m.created_at) = CURRENT_DATE THEN m.tokens_total ELSE 0 END), 0) AS today_tokens
         FROM users u
-        LEFT JOIN sessions s ON s.user_id = u.id AND s.name IS NOT NULL
+        LEFT JOIN sessions s ON s.user_id = u.id
         LEFT JOIN messages m ON m.session_id = s.id
         WHERE u.is_admin = FALSE
         GROUP BY u.id
@@ -274,17 +274,39 @@ async def get_user_sessions_with_stats(user_id: int) -> list:
 
 async def get_user_daily_tokens(user_id: int) -> list:
     query = """
-        SELECT DATE(m.created_at) AS date,
-               SUM(m.tokens_total) AS tokens
-        FROM messages m
-        JOIN sessions s ON m.session_id = s.id
-        WHERE s.user_id = :user_id
-        GROUP BY DATE(m.created_at)
-        ORDER BY date DESC
-        LIMIT 30
+        WITH dates AS (
+            SELECT generate_series(
+                CURRENT_DATE - INTERVAL '29 days',
+                CURRENT_DATE,
+                '1 day'::interval
+            )::date AS date
+        ),
+        daily AS (
+            SELECT DATE(m.created_at) AS date,
+                   SUM(m.tokens_total) AS tokens
+            FROM messages m
+            JOIN sessions s ON m.session_id = s.id
+            WHERE s.user_id = :user_id
+            GROUP BY DATE(m.created_at)
+        )
+        SELECT d.date, COALESCE(daily.tokens, 0) AS tokens
+        FROM dates d
+        LEFT JOIN daily ON d.date = daily.date
+        ORDER BY d.date DESC
     """
     rows = await database.fetch_all(query, values={"user_id": user_id})
     return [dict(r) for r in rows]
+
+
+async def get_user_total_tokens(user_id: int) -> int:
+    query = """
+        SELECT COALESCE(SUM(m.tokens_total), 0)
+        FROM messages m
+        JOIN sessions s ON m.session_id = s.id
+        WHERE s.user_id = :user_id
+    """
+    row = await database.fetch_one(query, values={"user_id": user_id})
+    return int(row[0]) if row else 0
 
 
 async def get_session_messages_detail(session_id: str) -> list:
