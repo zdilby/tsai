@@ -48,7 +48,7 @@
                 <input type="hidden" id="max-file-size-mb" value="{{ max_file_size_mb }}">
             </form>
             <form id="upload-form" style="display:none;">
-                <input type="file" id="file-input" name="file" accept=".txt,.pdf,.docx,.epub">
+                <input type="file" id="file-input" name="file" accept=".txt,.pdf,.docx,.doc,.epub">
             </form>
             <button class="btn waves-effect waves-light teal lighten-1" id="input-btn">发送</button>
             {% if session_exists %}
@@ -58,7 +58,7 @@
     </div>
 </div>
 <form id="modal-upload-form" style="display:none;">
-    <input type="file" id="modal-file-input" name="file" accept=".txt,.pdf,.docx,.epub">
+    <input type="file" id="modal-file-input" name="file" accept=".txt,.pdf,.docx,.doc,.epub">
     <input type="hidden" id="modal-session-id" value="">
 </form>
 <div id="new-chat-modal" class="modal">
