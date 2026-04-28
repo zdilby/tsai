@@ -38,6 +38,8 @@ class Settings(BaseModel):
     rag_distance_threshold: float = float(os.getenv("RAG_DISTANCE_THRESHOLD", "0.40"))
     hnsw_ef_search: int = int(os.getenv("HNSW_EF_SEARCH", "100"))
     max_history_turns: int = int(os.getenv("MAX_HISTORY_TURNS", "12"))
+    # session 总语料 token 数低于此阈值时，/chat 走全量上下文路径（跳过 RAG 检索）
+    full_context_threshold: int = int(os.getenv("FULL_CONTEXT_THRESHOLD", "300000"))
     secret_key: str = os.getenv("SECRET_KEY")
     base_dir: Path = BASE_DIR
 

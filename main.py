@@ -20,7 +20,7 @@ _RECALL_PATTERNS = re.compile(
 from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
 from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens, get_session_persona, get_session_persona_origin, update_session_persona, save_persona_origin, update_session_instruction
-from backend.rag import get_embedding, query_rag, query_history
+from backend.rag import get_embedding, query_rag, query_history, estimate_session_tokens, get_all_session_chunks
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
 from admin import admin_router
@@ -103,6 +103,15 @@ async def chat(background_tasks: BackgroundTasks,
     context = await get_context(session_id, limit=settings.max_history_turns)
     context_text = "\n".join([f"{c['role']}: {c['content']}" for c in context])
 
+    # 判断 session 语料规模：小语料走全量上下文路径，大语料走 RAG 路径
+    session_tokens = await estimate_session_tokens(session_id)
+    use_full_context = 0 < session_tokens < settings.full_context_threshold
+    logger.info(
+        "/chat session=%s tokens≈%d threshold=%d → %s",
+        session_id, session_tokens, settings.full_context_threshold,
+        "FULL_CONTEXT" if use_full_context else ("RAG" if session_tokens > 0 else "EMPTY_KB"),
+    )
+
     # embedding、RAG 查询、Web 搜索并发执行
     source_list = [s.strip() for s in source_files.split(',') if s.strip()] if source_files else None
     query_embedding, web_info = await asyncio.gather(
@@ -119,29 +128,51 @@ async def chat(background_tasks: BackgroundTasks,
     history_embedding = await get_embedding(embed_client, recall_query) if is_recall else query_embedding
     history_threshold = 0.55 if is_recall else 0.4
 
-    rag_results, history_results = await asyncio.gather(
-        query_rag(query_embedding, session_id=session_id, source_files=source_list),
-        query_history(history_embedding, session_id=session_id,
-                      before_id=oldest_recent_id, threshold=history_threshold),
-    )
-
-    rag_text = "\n".join([r["content"] for r in rag_results])
-    rag_citations = [
-        {
-            "source": r["source_file"],
-            "chunk": r["chunk_index"],
-            "score": round(1 - r["distance"], 3),
-            "snippet": (r.get("original_content") or "")[:200].strip(),
-        }
-        for r in rag_results
-    ]
+    if use_full_context:
+        # 小语料：全量加载所有 chunk，按文档分组带文件头
+        all_chunks, history_results = await asyncio.gather(
+            get_all_session_chunks(session_id),
+            query_history(history_embedding, session_id=session_id,
+                          before_id=oldest_recent_id, threshold=history_threshold),
+        )
+        by_file: dict[str, list[str]] = {}
+        for c in all_chunks:
+            by_file.setdefault(c["source_file"], []).append(c["content"])
+        rag_text = "\n\n".join(
+            f"=== 文件：{src} ===\n" + "\n".join(parts)
+            for src, parts in by_file.items()
+        )
+        rag_citations = [
+            {"source": src, "chunk": None, "score": 1.0, "snippet": ""}
+            for src in by_file
+        ]
+        has_kb = bool(by_file)
+    else:
+        # 大语料 / 空知识库：走 RAG 检索
+        rag_results, history_results = await asyncio.gather(
+            query_rag(query_embedding, session_id=session_id, source_files=source_list),
+            query_history(history_embedding, session_id=session_id,
+                          before_id=oldest_recent_id, threshold=history_threshold),
+        )
+        rag_text = "\n".join([r["content"] for r in rag_results])
+        rag_citations = [
+            {
+                "source": r["source_file"],
+                "chunk": r["chunk_index"],
+                "score": round(1 - r["distance"], 3),
+                "snippet": (r.get("original_content") or "")[:200].strip(),
+            }
+            for r in rag_results
+        ]
+        has_kb = bool(rag_results)
 
     # 构建提示词 prompt
-    rag_section = (
-        f"Relevant info from uploaded documents:\n{rag_text}\n\n"
-        if rag_results else
-        "Relevant info from uploaded documents:\n（当前问题在知识库中未找到相关文档内容）\n\n"
-    )
+    if use_full_context and has_kb:
+        rag_section = f"All uploaded documents in this session (full content):\n{rag_text}\n\n"
+    elif has_kb:
+        rag_section = f"Relevant info from uploaded documents:\n{rag_text}\n\n"
+    else:
+        rag_section = "Relevant info from uploaded documents:\n（当前问题在知识库中未找到相关文档内容）\n\n"
     web_section = f"Latest info from web:\n{web_info}\n\n" if web_info else ""
     if history_results:
         history_items = "\n".join([

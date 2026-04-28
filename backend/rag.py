@@ -104,6 +104,42 @@ async def query_history(query_embedding, session_id: str,
     ]
 
 
+# ── 全量上下文支持 ─────────────────────────────────────────────────────────────
+# 启发式 token 估算：中文 ~2 字符/token，英文 ~4 字符/token，混合内容取 2.5。
+# 用于 /chat 路由判断 session 总语料是否能直接放进 Gemini 1M 窗口。
+_CHARS_PER_TOKEN = 2.5
+
+
+def estimate_tokens(text: str) -> int:
+    """估算单段文本的 token 数（启发式，零成本）。"""
+    return int(len(text) / _CHARS_PER_TOKEN) if text else 0
+
+
+# 估算 session 全部知识库语料的 token 总量
+async def estimate_session_tokens(session_id: str) -> int:
+    row = await database.fetch_one(
+        "SELECT COALESCE(SUM(LENGTH(COALESCE(original_content, content))), 0) AS total_chars "
+        "FROM knowledge_base "
+        "WHERE session_id = :sid AND source_file IS NOT NULL",
+        {"sid": session_id},
+    )
+    total_chars = int(row["total_chars"]) if row else 0
+    return int(total_chars / _CHARS_PER_TOKEN)
+
+
+# 拉取 session 全部 chunk，按 (source_file, chunk_index) 排序保留文档原顺序
+async def get_all_session_chunks(session_id: str) -> list:
+    rows = await database.fetch_all(
+        "SELECT source_file, chunk_index, "
+        "       COALESCE(original_content, content) AS content "
+        "FROM knowledge_base "
+        "WHERE session_id = :sid AND source_file IS NOT NULL "
+        "ORDER BY source_file, chunk_index",
+        {"sid": session_id},
+    )
+    return [dict(r) for r in rows]
+
+
 _embed_config = types.EmbedContentConfig(output_dimensionality=settings.embedding_dim)
 
 
