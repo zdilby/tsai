@@ -357,6 +357,9 @@ async def run_agent_chat(
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         tools=_TOOLS,
+        # 显式关闭 SDK 的自动函数调用——我们走的是手动循环，
+        # 否则 SDK 会在每次调用时打 "AFC is enabled" 噪音日志
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     trace: list = []
