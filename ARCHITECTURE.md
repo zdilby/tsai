@@ -210,31 +210,52 @@ embedding        vector(768)
 1. 验证 JWT Cookie → 获取用户信息
 2. 检查今日 Token 配额（超限返回 429）
 3. 保存用户消息到 messages 表
-4. 估算 session 总语料 token 数（启发式：len(text)/2.5）
+4. 估算 session 总语料 token 数（启发式：len(text)/2.5）+ 路由决策：
    ├── < FULL_CONTEXT_THRESHOLD (默认 300_000) → 全量上下文路径（5a）
-   └── ≥ THRESHOLD 或语料为空 → RAG 路径（5b）
-5. 获取最近历史 + 并发执行：
-   ├── Gemini 生成 Query Embedding
-   └── Google Custom Search 抓取网页摘要（top 5）
-6. 检测"你还记得/上次/之前"等回忆模式 → 语义检索历史消息
+   ├── ≥ THRESHOLD + AGENT_CHAT_ENABLED + needs_agent(query) → Agent 路径（5c）
+   └── 其余 → RAG 路径（5b，含空知识库）
 
    ┌─ 5a 全量上下文（小语料）：
    │    ├── get_all_session_chunks(session_id) 拉取全部 chunk
    │    ├── 按 (source_file, chunk_index) 排序，加文件头分组
    │    └── Prompt 段落："All uploaded documents (full content)"
    │
-   └─ 5b RAG（大语料 / 空知识库）：
-        ├── pgvector 相似度检索 knowledge_base（< 0.40，最多 20 条）
-        ├── 动态 Top-K 选择（Margin + Gap 策略）
-        └── Prompt 段落："Relevant info from uploaded documents"
+   ├─ 5b RAG（大语料 / 简单查询 / 空知识库）：
+   │    ├── 并发：Gemini Query Embedding + Google CSE 网页抓取
+   │    ├── 检测回忆触发词 → 语义检索历史消息（query_history）
+   │    ├── pgvector 相似度检索 knowledge_base（< 0.40，最多 20 条）
+   │    └── 动态 Top-K 选择（Margin + Gap 策略）
+   │
+   └─ 5c Agent ReAct 循环（大语料 + 复杂查询）：
+        ├── 预抓 web_info，作为 Agent 免费上下文
+        ├── 调用 run_agent_chat()，最多 AGENT_MAX_ITERATIONS=6 轮
+        │    每轮：Gemini 决定调哪些 tool（search_kb / read_document /
+        │           list_documents / web_search / search_history）
+        │           → asyncio.gather 并行执行 → 喂回结果
+        │    提前退出条件：search_kb 命中 distance<0.3 时 prompt 鼓励直接作答
+        └── 累计 token + citations + agent_trace 一并返回
 
-7. 拼装 Prompt：[最近 12 轮] + [历史相关] + [文档段] + [网络信息]
-8. 调用 Gemini（附 Google Search grounding + 角色人格）
-9. 保存 AI 回复 + Token 计数到 messages 表
-10. 后台任务：计算回复 Embedding，写回 messages.embedding
+5. 拼装 Prompt（5a/5b 路径）：[最近 12 轮] + [历史相关] + [文档段] + [网络信息]
+6. 调用 Gemini（附 Google Search grounding + 角色人格）
+7. 保存 AI 回复 + Token 计数到 messages 表
+8. 后台任务：计算回复 Embedding，写回 messages.embedding
 ```
 
-> **路径选择日志**：每次 /chat 都会输出 `tokens≈N threshold=M → FULL_CONTEXT|RAG|EMPTY_KB`，便于观察实际触发情况。
+> **路径选择日志**：每次 /chat 都会输出 `tokens≈N threshold=M → FULL_CONTEXT|AGENT|RAG|EMPTY_KB`，便于观察实际触发情况。
+
+### 5.1.1 Agent 智能路由（`needs_agent` 启发式）
+
+只有以下任一信号触发时才进 Agent，其余复用 RAG 路径以保延迟：
+
+- **对比类**：包含"对比 / 区别 / 比较 / vs / 差异"
+- **回忆类**：匹配"还记得 / 之前 / 上次 / 我们聊过 / 你说过"等
+- **开放类**：包含"分析 / 总结 / 概括 / 评价 / 怎么看 / 为什么 / 原因"
+- **列举类**：包含"有哪些 / 都有什么 / 列出"
+- **多问句**：句中包含 ≥ 2 个问号
+
+且 query 长度 ≥ 15 字符（短问题大概率单次 RAG 够）。
+
+实测预期：60-70% 大语料 query 仍走 RAG 路径，延迟与 Phase 1 一致。
 
 ### 5.2 文件上传与 RAG 索引
 
@@ -360,6 +381,8 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `HNSW_EF_SEARCH` | `100` | HNSW 查询精度参数 |
 | `MAX_HISTORY_TURNS` | `12` | Prompt 中携带的历史轮数 |
 | `FULL_CONTEXT_THRESHOLD` | `300000` | session 总语料 token 数低于此阈值时走全量上下文路径（跳过 RAG 检索） |
+| `AGENT_CHAT_ENABLED` | `true` | Phase 2 Agent 循环开关，仅在大语料 + 复杂查询时激活 |
+| `AGENT_MAX_ITERATIONS` | `6` | Agent 单次对话最多调用工具数（含 LLM 决策轮）|
 | `HTTP_PROXY` | — | 可选 HTTP 代理 |
 | `ANTHROPIC_API_KEY` | — | Claude API 密钥（仅 `agent_system/` 子系统使用） |
 

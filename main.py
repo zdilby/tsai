@@ -21,6 +21,7 @@ from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
 from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens, get_session_persona, get_session_persona_origin, update_session_persona, save_persona_origin, update_session_instruction
 from backend.rag import get_embedding, query_rag, query_history, estimate_session_tokens, get_all_session_chunks
+from backend.agent_chat import needs_agent, run_agent_chat
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
 from admin import admin_router
@@ -106,12 +107,60 @@ async def chat(background_tasks: BackgroundTasks,
     # 判断 session 语料规模：小语料走全量上下文路径，大语料走 RAG 路径
     session_tokens = await estimate_session_tokens(session_id)
     use_full_context = 0 < session_tokens < settings.full_context_threshold
+
+    # Phase 2 Agent 路由：大语料 + 开关开启 + 复杂查询 → Agent 循环
+    use_agent = (
+        not use_full_context
+        and session_tokens > 0
+        and settings.agent_chat_enabled
+        and needs_agent(message)
+    )
+
     logger.info(
         "/chat session=%s tokens≈%d threshold=%d → %s",
         session_id, session_tokens, settings.full_context_threshold,
-        "FULL_CONTEXT" if use_full_context else ("RAG" if session_tokens > 0 else "EMPTY_KB"),
+        "FULL_CONTEXT" if use_full_context
+        else "AGENT" if use_agent
+        else ("RAG" if session_tokens > 0 else "EMPTY_KB"),
     )
 
+    # ── Phase 2 Agent 分支：独立完整流程，提前 return ─────────────────────────
+    if use_agent:
+        persona = await get_session_persona(session_id)
+        # 预抓 web 信息，作为 Agent 的免费上下文（减少 web_search 工具调用）
+        web_info = await fetch_from_web(message)
+        agent_result = await run_agent_chat(
+            query=message,
+            session_id=session_id,
+            persona=persona,
+            history_text=context_text,
+            web_info=web_info,
+        )
+        answer = agent_result["answer"]
+        a_tokens_in   = agent_result["tokens_in"]
+        a_tokens_out  = agent_result["tokens_out"]
+        a_tokens_total = a_tokens_in + a_tokens_out
+        msg_id = await save_message(
+            session_id, "assistant", answer,
+            tokens_in=a_tokens_in, tokens_out=a_tokens_out, tokens_total=a_tokens_total,
+        )
+
+        async def _agent_save_embedding():
+            try:
+                emb = await get_embedding(embed_client, answer[:2000])
+                await update_message_embedding(msg_id, emb)
+            except Exception as e:
+                logger.warning("历史消息 embedding 存储失败 (id=%s): %s", msg_id, e)
+
+        background_tasks.add_task(_agent_save_embedding)
+        return JSONResponse({
+            "answer": answer,
+            "citations": agent_result["citations"],
+            "agent_trace": agent_result["agent_trace"],
+            "iterations": agent_result["iterations"],
+        })
+
+    # ── 否则继续 Phase 1 既有路径 ────────────────────────────────────────────
     # embedding、RAG 查询、Web 搜索并发执行
     source_list = [s.strip() for s in source_files.split(',') if s.strip()] if source_files else None
     query_embedding, web_info = await asyncio.gather(

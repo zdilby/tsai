@@ -140,6 +140,38 @@ async def get_all_session_chunks(session_id: str) -> list:
     return [dict(r) for r in rows]
 
 
+# Agent tool 用：列出 session 内所有上传文档（含 chunk 数）
+async def list_session_documents(session_id: str) -> list:
+    rows = await database.fetch_all(
+        "SELECT source_file, COUNT(*) AS chunk_count, "
+        "       SUM(LENGTH(COALESCE(original_content, content))) AS total_chars "
+        "FROM knowledge_base "
+        "WHERE session_id = :sid AND source_file IS NOT NULL "
+        "GROUP BY source_file "
+        "ORDER BY source_file",
+        {"sid": session_id},
+    )
+    return [dict(r) for r in rows]
+
+
+# Agent tool 用：拉取指定文件的全部 chunk 拼成完整文档（chunk_index 升序）
+# 返回上限 30_000 字符，超出截断（避免 Agent 单次 read 撑爆上下文）
+async def get_full_document(session_id: str, filename: str, max_chars: int = 30_000) -> str:
+    rows = await database.fetch_all(
+        "SELECT chunk_index, COALESCE(original_content, content) AS content "
+        "FROM knowledge_base "
+        "WHERE session_id = :sid AND source_file = :fn "
+        "ORDER BY chunk_index",
+        {"sid": session_id, "fn": filename},
+    )
+    if not rows:
+        return ""
+    full = "\n\n".join(r["content"] for r in rows)
+    if len(full) > max_chars:
+        full = full[:max_chars] + f"\n\n... (truncated at {max_chars} chars)"
+    return full
+
+
 _embed_config = types.EmbedContentConfig(output_dimensionality=settings.embedding_dim)
 
 
