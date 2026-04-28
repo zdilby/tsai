@@ -6,3 +6,6 @@ venv/
 *.log
 static/loads/
 .DS_Store
+
+# Local-only：自动改代码工具，不上 git，不分享
+agent_system/
