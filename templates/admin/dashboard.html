@@ -7,6 +7,34 @@
     <link rel="icon" href="/static/images/favicon.png">
     <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
     <link rel="stylesheet" href="/static/css/admin.css">
+    <style>
+        .board-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            margin-top: 24px;
+        }
+        .board-card {
+            background: #fff;
+            border-radius: 8px;
+            padding: 32px 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            text-align: center;
+            transition: transform 0.15s, box-shadow 0.15s;
+            cursor: pointer;
+            text-decoration: none;
+            color: #333;
+            display: block;
+        }
+        .board-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+            color: #1976d2;
+        }
+        .board-card h5 { margin: 12px 0 8px; font-weight: 500; }
+        .board-card .desc { color: #757575; font-size: 14px; }
+        .board-card .icon { font-size: 48px; color: #1976d2; }
+    </style>
 </head>
 <body>
 <nav class="admin-nav">
@@ -16,182 +44,20 @@
     </div>
 </nav>
 <div class="admin-container">
-    <h5 class="section-title">用户列表</h5>
-    <table class="striped responsive-table">
-        <thead>
-            <tr>
-                <th>用户名</th>
-                <th>今日 Token</th>
-                <th>累计 Token</th>
-                <th>每日上限</th>
-                <th>Sessions</th>
-                <th>注册时间</th>
-                <th>操作</th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for u in users %}
-            <tr>
-                <td><a href="/admin/user/{{ u.id }}">{{ u.username }}</a></td>
-                <td>{{ u.today_tokens | int }}</td>
-                <td>{{ u.total_tokens | int }}</td>
-                <td>
-                    <span class="max-token-val" data-uid="{{ u.id }}" data-raw="{{ u.max_daily_tokens or 0 }}">
-                        {%- if not u.max_daily_tokens %}无限制{% else %}{{ u.max_daily_tokens }}{% endif -%}
-                    </span>
-                    <a class="edit-max-token-btn" data-uid="{{ u.id }}" title="修改上限">✏️</a>
-                </td>
-                <td>{{ u.session_count }}</td>
-                <td>{{ u.created_at.strftime('%Y-%m-%d') if u.created_at else '' }}</td>
-                <td>
-                    <a href="/admin/user/{{ u.id }}" class="btn-small teal lighten-1 waves-effect">详情</a>
-                    <a class="btn-small blue lighten-1 waves-effect reset-pwd-btn"
-                       data-uid="{{ u.id }}" data-name="{{ u.username }}" style="margin-left:4px;">改密码</a>
-                </td>
-            </tr>
-        {% else %}
-            <tr><td colspan="7" style="text-align:center;color:#aaa;">暂无用户</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
-
-    <h5 class="section-title" style="margin-top:2em;">邀请码</h5>
-    <div style="margin-bottom:12px;">
-        <button id="gen-invite-btn" class="btn teal waves-effect waves-light btn-small">+ 生成新邀请码</button>
-    </div>
-    <table class="striped responsive-table compact-table" id="invite-table">
-        <thead><tr><th>邀请码</th><th>状态</th><th>使用者</th><th>创建时间</th><th>使用时间</th></tr></thead>
-        <tbody>
-        {% for c in invite_codes %}
-            <tr>
-                <td><code style="font-size:0.82rem;">{{ c.code }}</code></td>
-                <td>{% if c.used_by %}<span style="color:#c62828;">已使用</span>{% else %}<span style="color:#00796b;">未使用</span>{% endif %}</td>
-                <td>{{ c.used_by or '—' }}</td>
-                <td>{{ c.created_at.strftime('%Y-%m-%d %H:%M') if c.created_at else '' }}</td>
-                <td>{{ c.used_at.strftime('%Y-%m-%d %H:%M') if c.used_at else '—' }}</td>
-            </tr>
-        {% else %}
-            <tr><td colspan="5" style="text-align:center;color:#aaa;">暂无邀请码</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</div>
-
-<div id="pwd-modal" class="modal-overlay" style="display:none;">
-    <div class="modal-box">
-        <h6>修改用户密码</h6>
-        <p id="pwd-modal-label" style="font-size:0.9rem;color:#546e7a;margin-bottom:8px;"></p>
-        <input type="password" id="new-password-input" placeholder="输入新密码（至少 6 位）" autocomplete="new-password">
-        <div class="modal-actions">
-            <button id="pwd-cancel-btn" class="btn-flat waves-effect">取消</button>
-            <button id="pwd-save-btn" class="btn blue lighten-1 waves-effect">保存</button>
-        </div>
+    <h5 class="section-title">选择管理板块</h5>
+    <div class="board-grid">
+        <a class="board-card" href="/admin/users">
+            <div class="icon">👥</div>
+            <h5>用户管理</h5>
+            <div class="desc">查看用户、配额、Session、邀请码</div>
+        </a>
+        <a class="board-card" href="/admin/perf">
+            <div class="icon">⚙️</div>
+            <h5>性能调优</h5>
+            <div class="desc">机器人 Query 监控、Trace 分析、Prompt 版本管理</div>
+        </a>
     </div>
 </div>
-
-<div id="edit-modal" class="modal-overlay" style="display:none;">
-    <div class="modal-box">
-        <h6>修改每日 Token 上限</h6>
-        <p id="edit-modal-label"></p>
-        <label class="unlimited-row">
-            <input type="checkbox" id="unlimited-check">
-            <span>无限制</span>
-        </label>
-        <input type="number" id="max-token-input" min="1" step="1000" placeholder="输入具体数值">
-        <div class="modal-actions">
-            <button id="modal-cancel-btn" class="btn-flat waves-effect">取消</button>
-            <button id="modal-save-btn" class="btn teal waves-effect">保存</button>
-        </div>
-    </div>
-</div>
-
-<script src="/static/js/jquery/jquery-3.6.4.min.js"></script>
-<script>
-let _editUid = null;
-
-$('.edit-max-token-btn').on('click', function () {
-    _editUid = $(this).data('uid');
-    const raw = parseInt($(`.max-token-val[data-uid="${_editUid}"]`).data('raw'));
-    const isUnlimited = !raw || raw === 0;
-    $('#edit-modal-label').text(`用户 ID: ${_editUid}`);
-    $('#unlimited-check').prop('checked', isUnlimited);
-    $('#max-token-input').val(isUnlimited ? '' : raw).prop('disabled', isUnlimited);
-    $('#edit-modal').show();
-});
-
-$('#unlimited-check').on('change', function () {
-    $('#max-token-input').prop('disabled', this.checked).val(this.checked ? '' : '');
-});
-
-$('#modal-cancel-btn').on('click', () => $('#edit-modal').hide());
-
-$('#modal-save-btn').on('click', async function () {
-    const unlimited = $('#unlimited-check').is(':checked');
-    const val = unlimited ? 0 : parseInt($('#max-token-input').val());
-    if (!unlimited && (isNaN(val) || val < 1)) return;
-    const fd = new FormData();
-    fd.append('max_tokens', val);
-    const resp = await fetch(`/admin/user/${_editUid}/max_tokens`, { method: 'POST', body: fd, credentials: 'include' });
-    const data = await resp.json();
-    if (data.success) {
-        const $span = $(`.max-token-val[data-uid="${_editUid}"]`);
-        $span.data('raw', val).text(val === 0 ? '无限制' : val);
-        $('#edit-modal').hide();
-    }
-});
-
-$('#edit-modal').on('click', function (e) {
-    if ($(e.target).is('#edit-modal')) $(this).hide();
-});
-
-// 改密码
-let _pwdUid = null;
-$('.reset-pwd-btn').on('click', function () {
-    _pwdUid = $(this).data('uid');
-    const name = $(this).data('name');
-    $('#pwd-modal-label').text(`用户：${name}`);
-    $('#new-password-input').val('');
-    $('#pwd-modal').show();
-    setTimeout(() => $('#new-password-input').focus(), 50);
-});
-$('#pwd-cancel-btn').on('click', () => $('#pwd-modal').hide());
-$('#pwd-modal').on('click', function (e) {
-    if ($(e.target).is('#pwd-modal')) $(this).hide();
-});
-$('#pwd-save-btn').on('click', async function () {
-    const pwd = $('#new-password-input').val().trim();
-    if (pwd.length < 6) { alert('密码至少需要 6 位'); return; }
-    const fd = new FormData();
-    fd.append('new_password', pwd);
-    const resp = await fetch(`/admin/user/${_pwdUid}/reset_password`, { method: 'POST', body: fd, credentials: 'include' });
-    const data = await resp.json();
-    if (data.success) {
-        $('#pwd-modal').hide();
-        alert('密码已修改');
-    } else {
-        alert(data.detail || '修改失败');
-    }
-});
-
-// 生成邀请码
-$('#gen-invite-btn').on('click', async function () {
-    $(this).prop('disabled', true).text('生成中…');
-    const resp = await fetch('/admin/invite/generate', { method: 'POST', credentials: 'include' });
-    const data = await resp.json();
-    $(this).prop('disabled', false).text('+ 生成新邀请码');
-    if (data.success) {
-        const $tbody = $('#invite-table tbody');
-        if ($tbody.find('td[colspan]').length) $tbody.empty();
-        const today = new Date().toISOString().slice(0, 16).replace('T', ' ');
-        $tbody.prepend(`<tr>
-            <td><code style="font-size:0.82rem;">${data.code}</code></td>
-            <td><span style="color:#00796b;">未使用</span></td>
-            <td>—</td>
-            <td>${today}</td>
-            <td>—</td>
-        </tr>`);
-    }
-});
-</script>
+<script src="/static/materialize/js/materialize.min.js"></script>
 </body>
 </html>

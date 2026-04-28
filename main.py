@@ -8,6 +8,7 @@ from google.genai import types
 from pgvector.asyncpg import register_vector, Vector
 import asyncio
 import re
+import time
 import uuid
 
 # 回忆触发词：检测到则剥离语气词，用核心话题做历史检索
@@ -19,7 +20,7 @@ _RECALL_PATTERNS = re.compile(
 )
 from settings import settings, client, embed_client, logger
 from account import router as account_router, get_current_user
-from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens, get_session_persona, get_session_persona_origin, update_session_persona, save_persona_origin, update_session_instruction
+from backend.db import database, init_db, save_message, update_message_embedding, get_context, session_exists, session_owned_by, add_knowledge, get_user_today_tokens, get_session_persona, get_session_persona_origin, update_session_persona, save_persona_origin, update_session_instruction, record_trace
 from backend.rag import get_embedding, query_rag, query_history, estimate_session_tokens, get_all_session_chunks
 from backend.agent_chat import needs_agent, run_agent_chat
 from midware.tools import fetch_from_web
@@ -38,6 +39,9 @@ templates = Jinja2Templates(directory="templates")
 async def startup():
     await database.connect()
     # await init_db()
+    # Phase 3a 表是幂等的（IF NOT EXISTS），可安全在每次启动时执行
+    from backend.db import init_phase3_tables
+    await init_phase3_tables()
     async with database._backend._pool.acquire() as conn:
         await register_vector(conn)
 
@@ -89,6 +93,7 @@ async def chat(background_tasks: BackgroundTasks,
                source_files: str = Form(""), user=Depends(get_current_user)):
     if not await session_owned_by(session_id, user["id"]):
         raise HTTPException(status_code=403, detail="无权访问该会话")
+    _chat_t0 = time.monotonic()
     # 检查每日 Token 配额
     max_tokens = user["max_daily_tokens"] or 0
     if max_tokens > 0:
@@ -153,6 +158,20 @@ async def chat(background_tasks: BackgroundTasks,
                 logger.warning("历史消息 embedding 存储失败 (id=%s): %s", msg_id, e)
 
         background_tasks.add_task(_agent_save_embedding)
+
+        # Phase 3a — 落盘 trace（异步，不阻塞响应）
+        background_tasks.add_task(
+            record_trace,
+            session_id=session_id, user_id=user["id"], message_id=msg_id,
+            query=message, route="agent",
+            tools_called=agent_result["agent_trace"],
+            iterations=agent_result["iterations"],
+            citations=agent_result["citations"],
+            tokens_in=a_tokens_in, tokens_out=a_tokens_out,
+            duration_ms=int((time.monotonic() - _chat_t0) * 1000),
+            prompt_version_id=agent_result.get("prompt_version_id"),
+        )
+
         return JSONResponse({
             "answer": answer,
             "citations": agent_result["citations"],
@@ -274,6 +293,20 @@ async def chat(background_tasks: BackgroundTasks,
             logger.warning("历史消息 embedding 存储失败 (id=%s): %s", msg_id, e)
 
     background_tasks.add_task(_save_embedding)
+
+    # Phase 3a — 落盘 trace（异步，不阻塞响应）
+    _route = "full_context" if use_full_context else ("rag" if has_kb else "empty_kb")
+    background_tasks.add_task(
+        record_trace,
+        session_id=session_id, user_id=user["id"], message_id=msg_id,
+        query=message, route=_route,
+        tools_called=[], iterations=1,
+        citations=rag_citations,
+        tokens_in=tokens_in, tokens_out=tokens_out,
+        duration_ms=int((time.monotonic() - _chat_t0) * 1000),
+        prompt_version_id=None,
+    )
+
     return JSONResponse({"answer": answer, "citations": rag_citations})
 
 

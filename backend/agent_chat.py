@@ -25,11 +25,13 @@ Phase 2 — Agent 循环（ReAct / Plan-Solve）
 """
 import asyncio
 import re
+import time
 from typing import Any
 
 from google.genai import types
 
 from settings import client, embed_client, logger, settings
+from .db import get_active_prompt, upsert_prompt_version
 from .rag import (
     get_embedding,
     query_rag,
@@ -37,6 +39,13 @@ from .rag import (
     list_session_documents,
     get_full_document,
 )
+
+# 用于 DB 中 prompt 的命名空间 key
+PROMPT_NAME = "agent_tool_rules"
+
+# 内存缓存（避免每次 /chat 都查 DB）
+_PROMPT_CACHE: dict = {}        # name -> (content, version_id, fetched_at)
+_PROMPT_CACHE_TTL = 30          # 秒，足够 Agent B 修改后准实时生效
 
 
 # ── Smart Router（优化 A）────────────────────────────────────────────────────
@@ -179,11 +188,43 @@ Google 搜索外部信息。何时用：
 """
 
 
-def build_system_prompt(persona: str | None) -> str:
-    """拼接 persona（若有）+ 工具使用规则。"""
+async def _get_cached_rules() -> tuple[str, int]:
+    """从内存缓存或 DB 取当前 active 的 _AGENT_TOOL_RULES 内容 + version_id。"""
+    cached = _PROMPT_CACHE.get(PROMPT_NAME)
+    now = time.monotonic()
+    if cached and now - cached[2] < _PROMPT_CACHE_TTL:
+        return cached[0], cached[1]
+
+    fetched = await get_active_prompt(PROMPT_NAME)
+    if fetched is None:
+        # DB 里没有 → 用文件中的兜底规则种 v1
+        version_id = await upsert_prompt_version(
+            PROMPT_NAME, _AGENT_TOOL_RULES, created_by="bootstrap",
+            reason="initial seed from agent_chat.py",
+        )
+        content = _AGENT_TOOL_RULES
+        logger.info("Seeded prompt %r v1 (id=%d) from default", PROMPT_NAME, version_id)
+    else:
+        content, version_id = fetched
+
+    _PROMPT_CACHE[PROMPT_NAME] = (content, version_id, now)
+    return content, version_id
+
+
+async def build_system_prompt(persona: str | None) -> tuple[str, int]:
+    """
+    拼接 persona（若有）+ 当前 active 的工具规则。
+    返回 (full_prompt, prompt_version_id) —— version_id 用于 trace 关联。
+    """
+    rules, version_id = await _get_cached_rules()
     identity = persona.strip() if persona and persona.strip() else \
         "你是 TSAI 智能助手，能基于用户在本会话上传的文档作答。"
-    return f"{identity}\n\n{_AGENT_TOOL_RULES}"
+    return f"{identity}\n\n{rules}", version_id
+
+
+def invalidate_prompt_cache() -> None:
+    """Agent B 改完 prompt 后调用此函数让所有进程下次请求重新拉。"""
+    _PROMPT_CACHE.clear()
 
 
 # ── Tool Definitions（Gemini function_declarations 格式）──────────────────────
@@ -342,7 +383,7 @@ async def run_agent_chat(
          - 否则 → 回答完成，break
       3. 累计 tokens、citations、trace
     """
-    system_prompt = build_system_prompt(persona)
+    system_prompt, prompt_version_id = await build_system_prompt(persona)
 
     user_content = (
         f"对话历史：\n{history_text}\n\n"
@@ -455,4 +496,5 @@ async def run_agent_chat(
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "iterations": iterations,
+        "prompt_version_id": prompt_version_id,
     }

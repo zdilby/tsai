@@ -200,6 +200,64 @@ embedding        vector(768)
 - `idx_knowledge_base_session_id` on `session_id`
 - `idx_knowledge_base_hnsw`（HNSW，cosine_ops）
 
+### `prompt_versions`（Phase 3a）
+
+版本化的 system prompt 存储，支持 Agent B 自动改 + 手动回滚。
+
+```sql
+id           SERIAL PRIMARY KEY
+name         TEXT NOT NULL                    -- e.g. "agent_tool_rules"
+content      TEXT NOT NULL
+version      INTEGER NOT NULL
+is_active    BOOLEAN DEFAULT FALSE             -- 同 name 下仅一行为 TRUE
+created_at   TIMESTAMP DEFAULT NOW()
+created_by   TEXT DEFAULT 'manual'             -- "manual" | "bootstrap" | "agent_b"
+reason       TEXT
+UNIQUE(name, version)
+```
+
+索引：`idx_prompt_versions_active`（partial，only `is_active = TRUE`）
+
+### `agent_traces`（Phase 3a）
+
+每次 `/chat` 完成后异步落盘的完整调用 trace。Agent B 据此分析。
+
+```sql
+id                  SERIAL PRIMARY KEY
+session_id          UUID
+user_id             INTEGER REFERENCES users(id)
+message_id          INTEGER REFERENCES messages(id)
+query               TEXT
+route               TEXT                       -- "rag" | "agent" | "full_context" | "empty_kb"
+tools_called        JSONB                      -- [{round, tool, args, result_preview}, ...]
+iterations          INTEGER DEFAULT 1
+citations           JSONB
+tokens_in           INTEGER
+tokens_out          INTEGER
+duration_ms         INTEGER
+prompt_version_id   INTEGER REFERENCES prompt_versions(id)
+hallucination_rate  FLOAT                       -- NULL until verified by Agent B
+analyzed_at         TIMESTAMP                   -- NULL = 尚未被 Agent B 分析
+created_at          TIMESTAMP DEFAULT NOW()
+```
+
+索引：
+- `idx_agent_traces_pending`（partial，`analyzed_at IS NULL`）—— Agent B 拉新数据用
+- `idx_agent_traces_route` on `(route, created_at DESC)`
+
+### `subsystem_status`（Phase 3a）
+
+机器人 / Agent B / Agent C 的启停状态 + 心跳。
+
+```sql
+component       TEXT PRIMARY KEY                -- "bot" | "agent_b" | "agent_c"
+enabled         BOOLEAN DEFAULT FALSE
+last_heartbeat  TIMESTAMP
+last_action     TEXT
+status_msg      TEXT
+updated_at      TIMESTAMP DEFAULT NOW()
+```
+
 ---
 
 ## 五、核心处理流程
@@ -342,8 +400,16 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 
 ## 八、管理员功能
 
-- **用户管理**：查看 Token 用量统计、调整每日配额和文件大小限制、强制重置密码
-- **邀请码**：生成新邀请码（UUID 格式）、查看使用状态
+`/admin/` 是板块选择页，分两个板块：
+
+- **`/admin/users` 用户管理**
+  - 查看 Token 用量统计、调整每日配额和文件大小限制、强制重置密码
+  - 邀请码：生成新邀请码（UUID 格式）、查看使用状态
+- **`/admin/perf` 性能调优**（Phase 3a 上线）
+  - 子系统状态：bot / agent_b / agent_c 的启停 + 心跳
+  - 近期 trace 摘要（最新 50 条 `/chat` 调用，含路径、轮数、耗时、tokens）
+  - Prompt 版本历史（含 active 标记、创建者、变更原因）
+  - **Phase 3b/3c 上线后**：bot 启停、Agent B 分析记录、prompt 回滚按钮等
 - **Session 审查**：查看任意用户的对话内容、Token 明细、文件处理状态
 - **运维脚本**（`scripts/`）：
 
@@ -668,3 +734,58 @@ await register_vector(conn)
 ```
 
 相关代码位于 `backend/db.py` 中所有涉及 `embedding` 列的函数。
+
+---
+
+## 十三、自主调优子系统（Phase 3）
+
+### 目标
+
+让 TSAI 的 Agent prompt 能"自己优化自己"——每天机器人跑测试 query → trace 落盘 → Agent B 周期性分析失败模式 → 自动修改 prompt → Agent C 验证效果（坏就回滚）。
+
+### 三阶段渐进上线
+
+| Phase | 范围 | 状态 |
+|---|---|---|
+| **3a** | 基础设施：DB 三表、prompt 搬到 DB、trace 自动落盘、admin 页面拆板块、Celery+Redis 骨架 | ✅ 已上线 |
+| 3b | 机器人用户：复刻"天书"的 session、每日 5 个 query、性能调优页展示数据 | ⏳ 待开发 |
+| 3c | Agent B（半自动 → 自动）：扫 `analyzed_at IS NULL` 的 trace、Gemini 分析、改 prompt | ⏳ 待开发 |
+| 3d | Agent C：prompt 改后跑验证集、计算 score、自动回滚 | ⏳ 待开发 |
+
+### 评分公式（Agent C 用）
+
+```
+score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
+```
+
+prompt 变更前后跑同样验证集，新版分数显著低于旧版 → 自动 rollback。
+
+### Prompt 加载机制
+
+`backend/agent_chat.py` 不再硬编码 `_AGENT_TOOL_RULES`，改为：
+
+```python
+async def build_system_prompt(persona: str | None) -> tuple[str, int]:
+    rules, version_id = await _get_cached_rules()  # 30s in-memory cache
+    return f"{identity}\n\n{rules}", version_id
+```
+
+- `_get_cached_rules()` 从 `prompt_versions WHERE is_active=TRUE` 拉取
+- 内存缓存 30 秒，避免每次 /chat 都查 DB
+- Agent B 改完后调用 `invalidate_prompt_cache()` 让所有进程下次请求重新拉
+- DB 里没有任何版本时（首次启动）→ 自动从代码兜底常量种入 v1
+
+### 调度框架（Celery + Redis）
+
+```
+backend/celery_app.py    Celery 实例 + Redis broker/backend 配置
+backend/tasks.py         任务定义（3a 仅 ping）
+
+启动 worker：
+    celery -A backend.celery_app worker --loglevel=info
+
+启动 beat（周期任务，3b 后才需要）：
+    celery -A backend.celery_app beat --loglevel=info
+```
+
+`.env` 配置：`REDIS_URL=redis://localhost:6379/0`

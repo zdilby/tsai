@@ -6,12 +6,14 @@ import uuid
 
 from account import get_current_admin, pwd_context
 from backend.db import (
+    database,
     get_all_users_with_stats, get_user_by_id,
     get_user_sessions_with_stats, get_user_daily_tokens, get_user_total_tokens,
     get_session_messages_detail, get_session_daily_tokens,
     get_session_files, get_session_info, update_user_max_tokens,
     update_user_max_file_size, update_user_password,
     get_all_invite_codes, create_invite_code,
+    get_all_subsystem_status, list_prompt_versions,
 )
 
 admin_router = APIRouter()
@@ -20,10 +22,39 @@ templates = Jinja2Templates(directory="templates")
 
 @admin_router.get("/", response_class=HTMLResponse)
 async def admin_dashboard(request: Request, admin=Depends(get_current_admin)):
+    """板块选择页：用户管理 / 性能调优。"""
+    return templates.TemplateResponse("admin/dashboard.html", {
+        "request": request, "admin": admin,
+    })
+
+
+@admin_router.get("/users", response_class=HTMLResponse)
+async def admin_users(request: Request, admin=Depends(get_current_admin)):
+    """用户管理（即原 /admin/ 内容）。"""
     users = await get_all_users_with_stats()
     invite_codes = await get_all_invite_codes()
-    return templates.TemplateResponse("admin/dashboard.html", {
+    return templates.TemplateResponse("admin/users.html", {
         "request": request, "users": users, "invite_codes": invite_codes, "admin": admin,
+    })
+
+
+@admin_router.get("/perf", response_class=HTMLResponse)
+async def admin_perf(request: Request, admin=Depends(get_current_admin)):
+    """性能调优：子系统状态 + 近期 trace + prompt 版本。"""
+    subsystems = await get_all_subsystem_status()
+    traces = await database.fetch_all(
+        """SELECT t.id, t.session_id, t.user_id, u.username, t.query, t.route,
+                  t.iterations, t.duration_ms, t.tokens_in, t.tokens_out, t.created_at
+           FROM agent_traces t LEFT JOIN users u ON u.id = t.user_id
+           ORDER BY t.created_at DESC LIMIT 50"""
+    )
+    traces = [dict(r) for r in traces]
+    prompt_versions = await list_prompt_versions("agent_tool_rules")
+    return templates.TemplateResponse("admin/perf.html", {
+        "request": request, "admin": admin,
+        "subsystems": subsystems, "traces": traces,
+        "prompt_versions": prompt_versions,
+        "prompt_name": "agent_tool_rules",
     })
 
 

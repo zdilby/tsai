@@ -67,3 +67,6 @@ urllib3==2.5.0
 uvicorn==0.35.0
 websockets==15.0.1
 yarl==1.20.1
+# Phase 3a — Celery 调度框架（机器人 / Agent B / Agent C 异步任务用）
+celery==5.4.0
+redis==5.0.8

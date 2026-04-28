@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>TSAI 性能调优</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/static/images/favicon.png">
+    <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
+    <style>
+        .perf-section { margin-bottom: 32px; }
+        .perf-section h6 { font-weight: 500; color: #424242; margin-bottom: 12px; }
+        .placeholder {
+            padding: 48px 24px; background: #fafafa; border: 1px dashed #ccc;
+            border-radius: 8px; text-align: center; color: #757575;
+        }
+        .status-table th, .status-table td { padding: 12px 16px; }
+        .status-on  { color: #43a047; font-weight: 500; }
+        .status-off { color: #9e9e9e; }
+        .back-link { display: inline-block; margin-bottom: 16px; color: #1976d2; }
+    </style>
+</head>
+<body>
+<nav class="admin-nav">
+    <div class="nav-wrapper">
+        <span class="brand-text">TSAI · 性能调优</span>
+        <span class="admin-badge">{{ admin.username }}</span>
+    </div>
+</nav>
+<div class="admin-container">
+    <a class="back-link" href="/admin/">← 返回板块选择</a>
+
+    <div class="perf-section">
+        <h6>子系统状态</h6>
+        <table class="striped status-table">
+            <thead>
+                <tr>
+                    <th>组件</th>
+                    <th>状态</th>
+                    <th>最后心跳</th>
+                    <th>最后操作</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for s in subsystems %}
+                <tr>
+                    <td>{{ s.component }}</td>
+                    <td>
+                        {% if s.enabled %}<span class="status-on">● 启用</span>
+                        {% else %}<span class="status-off">○ 停用</span>{% endif %}
+                    </td>
+                    <td>{{ s.last_heartbeat or '—' }}</td>
+                    <td>{{ s.last_action or '—' }}</td>
+                    <td>{{ s.status_msg or '—' }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="perf-section">
+        <h6>近期 Trace 摘要（最新 50 条）</h6>
+        {% if traces %}
+        <table class="striped">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>用户</th>
+                    <th>路径</th>
+                    <th>轮数</th>
+                    <th>耗时(ms)</th>
+                    <th>Tokens</th>
+                    <th>Query</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for t in traces %}
+                <tr>
+                    <td>{{ t.created_at.strftime('%m-%d %H:%M:%S') if t.created_at.strftime else t.created_at }}</td>
+                    <td>{{ t.username or t.user_id }}</td>
+                    <td>{{ t.route }}</td>
+                    <td>{{ t.iterations }}</td>
+                    <td>{{ t.duration_ms or '—' }}</td>
+                    <td>{{ t.tokens_in }}/{{ t.tokens_out }}</td>
+                    <td title="{{ t.query }}">{{ t.query[:60] }}{% if t.query|length > 60 %}…{% endif %}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="placeholder">还没有 trace 数据。<br>当用户使用 /chat 后，trace 会自动落盘到这里。</div>
+        {% endif %}
+    </div>
+
+    <div class="perf-section">
+        <h6>Prompt 版本（{{ prompt_name }}）</h6>
+        {% if prompt_versions %}
+        <table class="striped">
+            <thead>
+                <tr>
+                    <th>版本</th>
+                    <th>状态</th>
+                    <th>创建者</th>
+                    <th>原因</th>
+                    <th>时间</th>
+                    <th>预览</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for v in prompt_versions %}
+                <tr>
+                    <td>v{{ v.version }}</td>
+                    <td>
+                        {% if v.is_active %}<span class="status-on">● 当前</span>
+                        {% else %}<span class="status-off">○ 历史</span>{% endif %}
+                    </td>
+                    <td>{{ v.created_by }}</td>
+                    <td>{{ v.reason or '—' }}</td>
+                    <td>{{ v.created_at.strftime('%m-%d %H:%M') if v.created_at.strftime else v.created_at }}</td>
+                    <td>{{ v.preview }}{% if v.preview|length >= 200 %}…{% endif %}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="placeholder">还没有 prompt 版本记录。第一次 /chat AGENT 路径触发后会自动种入 v1。</div>
+        {% endif %}
+    </div>
+
+    <div class="perf-section">
+        <h6>Agent B / Agent C 控制（Phase 3b/3c 启用后激活）</h6>
+        <div class="placeholder">机器人调度、Trace 分析、Prompt 验证的启停按钮将在 Phase 3b/3c 上线后出现在这里。</div>
+    </div>
+</div>
+<script src="/static/materialize/js/materialize.min.js"></script>
+</body>
+</html>

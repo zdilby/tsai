@@ -1,3 +1,4 @@
+import json
 import os
 from databases import Database
 from settings import settings
@@ -115,6 +116,77 @@ async def init_account_tables():
             used_at TIMESTAMP
         )
     """)
+
+
+# Phase 3a — 自主调优子系统所需的三张表。幂等创建，可在每次 startup 安全调用。
+async def init_phase3_tables():
+    # 1. prompt_versions —— 版本化的 prompt 存储 + 回滚支持
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS prompt_versions (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            is_active BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            created_by TEXT DEFAULT 'manual',
+            reason TEXT,
+            UNIQUE(name, version)
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_prompt_versions_active
+          ON prompt_versions(name) WHERE is_active = TRUE
+    """)
+
+    # 2. agent_traces —— 每次 /chat 留痕（所有路径）
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS agent_traces (
+            id SERIAL PRIMARY KEY,
+            session_id UUID,
+            user_id INTEGER REFERENCES users(id),
+            message_id INTEGER REFERENCES messages(id),
+            query TEXT,
+            route TEXT,
+            tools_called JSONB DEFAULT '[]'::jsonb,
+            iterations INTEGER DEFAULT 1,
+            citations JSONB DEFAULT '[]'::jsonb,
+            tokens_in INTEGER DEFAULT 0,
+            tokens_out INTEGER DEFAULT 0,
+            duration_ms INTEGER,
+            prompt_version_id INTEGER REFERENCES prompt_versions(id),
+            hallucination_rate FLOAT,
+            analyzed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_traces_pending
+          ON agent_traces(created_at) WHERE analyzed_at IS NULL
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_traces_route
+          ON agent_traces(route, created_at DESC)
+    """)
+
+    # 3. subsystem_status —— 子系统启停 + 心跳
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS subsystem_status (
+            component TEXT PRIMARY KEY,
+            enabled BOOLEAN DEFAULT FALSE,
+            last_heartbeat TIMESTAMP,
+            last_action TEXT,
+            status_msg TEXT,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    # 三个组件的初始记录（幂等）
+    for component in ("bot", "agent_b", "agent_c"):
+        await database.execute(
+            """INSERT INTO subsystem_status (component, enabled)
+               VALUES (:c, FALSE) ON CONFLICT (component) DO NOTHING""",
+            {"c": component},
+        )
 
 
 async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
@@ -440,4 +512,153 @@ async def create_invite_code(code: str):
     await database.execute(
         "INSERT INTO invite_codes (code) VALUES (:code)",
         values={"code": code}
+    )
+
+
+# ── Phase 3a — 自主调优子系统辅助函数 ────────────────────────────────────────
+
+async def get_active_prompt(name: str) -> tuple[str, int] | None:
+    """返回 (content, version_id)，没有 active 版本则返回 None。"""
+    row = await database.fetch_one(
+        "SELECT id, content FROM prompt_versions "
+        "WHERE name = :n AND is_active = TRUE LIMIT 1",
+        values={"n": name},
+    )
+    return (row["content"], row["id"]) if row else None
+
+
+async def upsert_prompt_version(
+    name: str,
+    content: str,
+    created_by: str = "manual",
+    reason: str | None = None,
+) -> int:
+    """新建版本并标记为 active，旧版自动 demote。返回新 version_id。"""
+    async with database.transaction():
+        next_v_row = await database.fetch_one(
+            "SELECT COALESCE(MAX(version), 0) + 1 AS next "
+            "FROM prompt_versions WHERE name = :n",
+            values={"n": name},
+        )
+        next_v = next_v_row["next"]
+        await database.execute(
+            "UPDATE prompt_versions SET is_active = FALSE WHERE name = :n",
+            values={"n": name},
+        )
+        new_id = await database.fetch_val(
+            """INSERT INTO prompt_versions (name, content, version, is_active, created_by, reason)
+               VALUES (:n, :c, :v, TRUE, :b, :r)
+               RETURNING id""",
+            values={"n": name, "c": content, "v": next_v, "b": created_by, "r": reason},
+        )
+        return new_id
+
+
+async def list_prompt_versions(name: str, limit: int = 50) -> list:
+    """按版本号倒序列出某 prompt 的历史版本（admin 页面 + 回滚用）。"""
+    rows = await database.fetch_all(
+        "SELECT id, version, is_active, created_at, created_by, reason, "
+        "       LEFT(content, 200) AS preview "
+        "FROM prompt_versions WHERE name = :n "
+        "ORDER BY version DESC LIMIT :lim",
+        values={"n": name, "lim": limit},
+    )
+    return [dict(r) for r in rows]
+
+
+async def activate_prompt_version(version_id: int) -> bool:
+    """显式回滚：把指定 version_id 设为 active，同 name 下其余 demote。"""
+    async with database.transaction():
+        row = await database.fetch_one(
+            "SELECT name FROM prompt_versions WHERE id = :id",
+            values={"id": version_id},
+        )
+        if not row:
+            return False
+        name = row["name"]
+        await database.execute(
+            "UPDATE prompt_versions SET is_active = FALSE WHERE name = :n",
+            values={"n": name},
+        )
+        await database.execute(
+            "UPDATE prompt_versions SET is_active = TRUE WHERE id = :id",
+            values={"id": version_id},
+        )
+        return True
+
+
+async def record_trace(
+    *,
+    session_id: str,
+    user_id: int,
+    message_id: int | None,
+    query: str,
+    route: str,
+    tools_called: list | None = None,
+    iterations: int = 1,
+    citations: list | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    duration_ms: int = 0,
+    prompt_version_id: int | None = None,
+) -> int:
+    """异步落盘一次 /chat 调用的完整 trace。返回 trace id。"""
+    new_id = await database.fetch_val(
+        """INSERT INTO agent_traces (
+                session_id, user_id, message_id, query, route,
+                tools_called, iterations, citations,
+                tokens_in, tokens_out, duration_ms, prompt_version_id
+            ) VALUES (
+                :sid, :uid, :mid, :q, :r,
+                CAST(:tc AS jsonb), :it, CAST(:cit AS jsonb),
+                :ti, :to, :dur, :pv
+            ) RETURNING id""",
+        values={
+            "sid": session_id,
+            "uid": user_id,
+            "mid": message_id,
+            "q": query,
+            "r": route,
+            "tc": json.dumps(tools_called or [], ensure_ascii=False),
+            "it": iterations,
+            "cit": json.dumps(citations or [], ensure_ascii=False),
+            "ti": tokens_in,
+            "to": tokens_out,
+            "dur": duration_ms,
+            "pv": prompt_version_id,
+        },
+    )
+    return new_id
+
+
+async def get_subsystem_status(component: str) -> dict | None:
+    row = await database.fetch_one(
+        "SELECT * FROM subsystem_status WHERE component = :c",
+        values={"c": component},
+    )
+    return dict(row) if row else None
+
+
+async def get_all_subsystem_status() -> list:
+    rows = await database.fetch_all(
+        "SELECT * FROM subsystem_status ORDER BY component"
+    )
+    return [dict(r) for r in rows]
+
+
+async def set_subsystem_enabled(component: str, enabled: bool, status_msg: str | None = None):
+    await database.execute(
+        """UPDATE subsystem_status
+           SET enabled = :e, status_msg = :m, updated_at = NOW()
+           WHERE component = :c""",
+        values={"c": component, "e": enabled, "m": status_msg},
+    )
+
+
+async def heartbeat_subsystem(component: str, last_action: str | None = None):
+    await database.execute(
+        """UPDATE subsystem_status
+           SET last_heartbeat = NOW(), last_action = :a, updated_at = NOW()
+           WHERE component = :c""",
+        values={"c": component, "a": last_action},
     )
