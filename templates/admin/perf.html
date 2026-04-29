@@ -129,10 +129,99 @@
     </div>
 
     <div class="perf-section">
-        <h6>Agent B / Agent C 控制（Phase 3b/3c 启用后激活）</h6>
-        <div class="placeholder">机器人调度、Trace 分析、Prompt 验证的启停按钮将在 Phase 3b/3c 上线后出现在这里。</div>
+        <h6>机器人控制（Phase 3b）</h6>
+        <p style="color:#616161;font-size:13px;margin:8px 0 16px;">
+            机器人用户：<b>{{ bot_username }}</b>　复刻源：<b>{{ bot_source_username }}</b>
+            当前持有 sessions：<b>{{ bot_session_count }}</b>
+        </p>
+        <div style="margin-bottom:12px;">
+            <button class="btn waves-effect waves-light" id="btn-bot-start">启用每日自动 query</button>
+            <button class="btn waves-effect waves-light grey" id="btn-bot-stop">停用</button>
+            <button class="btn waves-effect waves-light orange" id="btn-bot-snapshot">复刻 session（一次性）</button>
+            <button class="btn waves-effect waves-light blue" id="btn-bot-run-now">立即跑一次</button>
+        </div>
+        <div id="bot-msg" style="margin-top:8px;color:#616161;font-size:13px;"></div>
+    </div>
+
+    <div class="perf-section">
+        <h6>机器人最近 20 条自动 query</h6>
+        {% if bot_recent %}
+        <table class="striped">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>Session</th>
+                    <th>路径</th>
+                    <th>轮数</th>
+                    <th>耗时(ms)</th>
+                    <th>Query</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for q in bot_recent %}
+                <tr>
+                    <td>{{ q.created_at.strftime('%m-%d %H:%M:%S') if q.created_at.strftime else q.created_at }}</td>
+                    <td>{{ q.session_name or '—' }}</td>
+                    <td>{{ q.route }}</td>
+                    <td>{{ q.iterations }}</td>
+                    <td>{{ q.duration_ms or '—' }}</td>
+                    <td title="{{ q.query }}">{{ q.query[:80] }}{% if q.query|length > 80 %}…{% endif %}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="placeholder">机器人还没跑过 query。先点"复刻 session"，再点"立即跑一次"。</div>
+        {% endif %}
+    </div>
+
+    <div class="perf-section">
+        <h6>Agent B / Agent C 控制（Phase 3c/3d 启用后激活）</h6>
+        <div class="placeholder">Trace 分析与 Prompt 验证的控制按钮将在 Phase 3c/3d 上线后出现在这里。</div>
     </div>
 </div>
 <script src="/static/materialize/js/materialize.min.js"></script>
+<script>
+(function() {
+    const msgEl = document.getElementById('bot-msg');
+    function showMsg(text, isErr) {
+        msgEl.textContent = text;
+        msgEl.style.color = isErr ? '#d32f2f' : '#388e3c';
+    }
+    async function postBot(path, btn, successText) {
+        btn.disabled = true;
+        showMsg('请求中...', false);
+        try {
+            const resp = await fetch(path, { method: 'POST', credentials: 'include' });
+            const data = await resp.json();
+            if (resp.ok && data.success) {
+                showMsg(successText + (data.task_id ? '（task_id=' + data.task_id + '）' :
+                        data.sessions_copied !== undefined ?
+                        '：' + data.sessions_copied + ' sessions / ' + data.chunks_copied + ' chunks' : ''),
+                        false);
+                if (path === '/admin/bot/start' || path === '/admin/bot/stop') {
+                    setTimeout(() => location.reload(), 600);
+                }
+            } else {
+                showMsg('失败：' + (data.error || data.detail || resp.statusText), true);
+            }
+        } catch (e) {
+            showMsg('请求异常：' + e.message, true);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+    document.getElementById('btn-bot-start').onclick = (e) =>
+        postBot('/admin/bot/start', e.target, '已启用机器人每日自动 query');
+    document.getElementById('btn-bot-stop').onclick = (e) =>
+        postBot('/admin/bot/stop', e.target, '已停用');
+    document.getElementById('btn-bot-snapshot').onclick = (e) => {
+        if (!confirm('复刻会把"' + '{{ bot_source_username }}' + '"的所有 named session 复制给机器人。重复点击会产生重复副本。继续？')) return;
+        postBot('/admin/bot/snapshot', e.target, '复刻完成');
+    };
+    document.getElementById('btn-bot-run-now').onclick = (e) =>
+        postBot('/admin/bot/run_now', e.target, '已提交 Celery 任务');
+})();
+</script>
 </body>
 </html>

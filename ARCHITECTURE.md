@@ -449,6 +449,10 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `FULL_CONTEXT_THRESHOLD` | `300000` | session 总语料 token 数低于此阈值时走全量上下文路径（跳过 RAG 检索） |
 | `AGENT_CHAT_ENABLED` | `true` | Phase 2 Agent 循环开关，仅在大语料 + 复杂查询时激活 |
 | `AGENT_MAX_ITERATIONS` | `6` | Agent 单次对话最多调用工具数（含 LLM 决策轮）|
+| `REDIS_URL` | `redis://localhost:6379/0` | Phase 3a Celery broker / backend |
+| `BOT_USERNAME` | `机器人` | Phase 3b 机器人账号名 |
+| `BOT_SOURCE_USERNAME` | `天书` | Phase 3b session 复刻源（"天书"用户的所有 named session 会被复制给机器人） |
+| `BOT_RUN_HOUR` | `3` | Phase 3b 机器人每日跑 query 的小时（0-23） |
 | `HTTP_PROXY` | — | 可选 HTTP 代理 |
 | `ANTHROPIC_API_KEY` | — | Claude API 密钥（仅 `agent_system/` 子系统使用） |
 
@@ -748,7 +752,7 @@ await register_vector(conn)
 | Phase | 范围 | 状态 |
 |---|---|---|
 | **3a** | 基础设施：DB 三表、prompt 搬到 DB、trace 自动落盘、admin 页面拆板块、Celery+Redis 骨架 | ✅ 已上线 |
-| 3b | 机器人用户：复刻"天书"的 session、每日 5 个 query、性能调优页展示数据 | ⏳ 待开发 |
+| **3b** | 机器人用户：复刻"天书"的 session、每日 5 个 query、性能调优页展示数据 | ✅ 已上线 |
 | 3c | Agent B（半自动 → 自动）：扫 `analyzed_at IS NULL` 的 trace、Gemini 分析、改 prompt | ⏳ 待开发 |
 | 3d | Agent C：prompt 改后跑验证集、计算 score、自动回滚 | ⏳ 待开发 |
 
@@ -789,3 +793,50 @@ backend/tasks.py         任务定义（3a 仅 ping）
 ```
 
 `.env` 配置：`REDIS_URL=redis://localhost:6379/0`
+
+### 13.1 机器人子系统（Phase 3b）
+
+**目标**：自动产生测试流量验证 prompt 调教效果，无需人工每日手动测。
+
+**关键文件**：
+- `backend/bot.py` — 用户管理、session snapshot、query 生成、内部直跑模式
+- `backend/tasks.py` — `bot_run_daily_queries` Celery 任务
+- `scripts/setup_bot.py` — 一次性初始化脚本
+
+**初始化流程**（部署后执行一次）：
+
+```bash
+# 1. 创建机器人用户 + 复刻"天书"的 sessions
+python -m scripts.setup_bot
+
+# 2. 启动 Celery worker（执行任务）
+celery -A backend.celery_app worker -l info -D    # -D 后台运行
+
+# 3. 启动 Celery beat（按 BOT_RUN_HOUR 触发任务）
+celery -A backend.celery_app beat -l info -D
+
+# 4. 进 /admin/perf 点击「启用每日自动 query」
+```
+
+**每日任务流程**（默认每天 03:00 触发）：
+
+```
+1. 检查 subsystem_status.bot.enabled —— 关掉就跳过
+2. 按 day_of_year % N 选 1 个 bot session（每天轮换）
+3. 用 day_of_year 作 seed 从 10 个 query 模板里随机抽 5 个
+4. 顺序跑 5 条 query（不并发，避免打爆 Gemini quota）
+5. trace 自然落进 agent_traces，与真人 query 同一张表
+6. heartbeat_subsystem("bot", ...) 更新心跳
+```
+
+**Query 模板（10 个）**：覆盖 `small_talk` / `rag` / `agent` 三种路径的典型场景，含寒暄、列举、总结、对比、回忆、开放性、多问句、反幻觉。具体见 `backend/bot.py:_QUERY_TEMPLATES`。
+
+**机器人控制端点**（`/admin/perf` 页面按钮）：
+
+| Endpoint | 作用 |
+|---|---|
+| `POST /admin/bot/start` | 启用每日自动 query |
+| `POST /admin/bot/stop` | 停用 |
+| `POST /admin/bot/snapshot` | 触发一次性 session 复刻 |
+| `POST /admin/bot/run_now` | 立即触发 1 次每日任务（异步，Celery） |
+| `GET  /admin/bot/recent_queries` | 最近 20 条机器人 query 的 JSON |

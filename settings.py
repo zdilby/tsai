@@ -44,6 +44,10 @@ class Settings(BaseModel):
     agent_chat_enabled: bool = os.getenv("AGENT_CHAT_ENABLED", "true").lower() in ("1", "true", "yes")
     # Agent 单次对话最多调用的工具数（含 LLM 决策轮）
     agent_max_iterations: int = int(os.getenv("AGENT_MAX_ITERATIONS", "6"))
+    # Phase 3b — 机器人配置
+    bot_username: str = os.getenv("BOT_USERNAME", "机器人")
+    bot_source_username: str = os.getenv("BOT_SOURCE_USERNAME", "天书")
+    bot_run_hour: int = int(os.getenv("BOT_RUN_HOUR", "3"))
     secret_key: str = os.getenv("SECRET_KEY")
     base_dir: Path = BASE_DIR
 

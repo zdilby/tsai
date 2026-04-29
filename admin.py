@@ -40,7 +40,8 @@ async def admin_users(request: Request, admin=Depends(get_current_admin)):
 
 @admin_router.get("/perf", response_class=HTMLResponse)
 async def admin_perf(request: Request, admin=Depends(get_current_admin)):
-    """性能调优：子系统状态 + 近期 trace + prompt 版本。"""
+    """性能调优：子系统状态 + 近期 trace + prompt 版本 + 机器人控制。"""
+    from settings import settings as _settings
     subsystems = await get_all_subsystem_status()
     traces = await database.fetch_all(
         """SELECT t.id, t.session_id, t.user_id, u.username, t.query, t.route,
@@ -50,11 +51,34 @@ async def admin_perf(request: Request, admin=Depends(get_current_admin)):
     )
     traces = [dict(r) for r in traces]
     prompt_versions = await list_prompt_versions("agent_tool_rules")
+
+    # 机器人专属信息
+    bot_recent = await database.fetch_all(
+        """SELECT t.query, t.route, t.iterations, t.duration_ms,
+                  s.name AS session_name, t.created_at
+           FROM agent_traces t
+           JOIN users u ON u.id = t.user_id
+           LEFT JOIN sessions s ON s.id = t.session_id
+           WHERE u.username = :bot
+           ORDER BY t.created_at DESC LIMIT 20""",
+        values={"bot": _settings.bot_username},
+    )
+    bot_session_count = await database.fetch_val(
+        """SELECT COUNT(*) FROM sessions s
+           JOIN users u ON u.id = s.user_id
+           WHERE u.username = :bot AND s.name IS NOT NULL""",
+        values={"bot": _settings.bot_username},
+    )
+
     return templates.TemplateResponse("admin/perf.html", {
         "request": request, "admin": admin,
         "subsystems": subsystems, "traces": traces,
         "prompt_versions": prompt_versions,
         "prompt_name": "agent_tool_rules",
+        "bot_recent": [dict(r) for r in bot_recent],
+        "bot_session_count": bot_session_count or 0,
+        "bot_username": _settings.bot_username,
+        "bot_source_username": _settings.bot_source_username,
     })
 
 
@@ -126,3 +150,66 @@ async def generate_invite(admin=Depends(get_current_admin)):
     code = str(uuid.uuid4())
     await create_invite_code(code)
     return JSONResponse({"success": True, "code": code})
+
+
+# ── Phase 3b — 机器人控制端点 ────────────────────────────────────────────────
+
+@admin_router.post("/bot/start")
+async def bot_start(admin=Depends(get_current_admin)):
+    """启用机器人每日自动跑 query。"""
+    from backend.db import set_subsystem_enabled
+    await set_subsystem_enabled("bot", True, status_msg="enabled by admin")
+    return JSONResponse({"success": True, "enabled": True})
+
+
+@admin_router.post("/bot/stop")
+async def bot_stop(admin=Depends(get_current_admin)):
+    """停用机器人。已在跑的任务不会被中断，但下次 beat 触发时会跳过。"""
+    from backend.db import set_subsystem_enabled
+    await set_subsystem_enabled("bot", False, status_msg="disabled by admin")
+    return JSONResponse({"success": True, "enabled": False})
+
+
+@admin_router.post("/bot/snapshot")
+async def bot_snapshot(admin=Depends(get_current_admin)):
+    """
+    一次性 snapshot：把"天书"（settings.bot_source_username）的所有 named session
+    复刻给机器人用户。注意：重复调用会产生重复副本。
+    """
+    from backend.bot import ensure_bot_user, snapshot_user_sessions
+    from settings import settings as _settings
+    bot = await ensure_bot_user()
+    try:
+        result = await snapshot_user_sessions(_settings.bot_source_username, bot["id"])
+    except ValueError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    return JSONResponse({"success": True, **result})
+
+
+@admin_router.post("/bot/run_now")
+async def bot_run_now(admin=Depends(get_current_admin)):
+    """
+    立即触发一次机器人每日任务（不等 03:00 beat）。
+    通过 Celery 异步调度，立刻返回 task_id；前端可轮询结果或看 perf 页面 trace。
+    """
+    from backend.tasks import bot_run_daily_queries
+    async_result = bot_run_daily_queries.delay()
+    return JSONResponse({"success": True, "task_id": async_result.id})
+
+
+@admin_router.get("/bot/recent_queries")
+async def bot_recent_queries(admin=Depends(get_current_admin)):
+    """返回机器人最近 20 条自动 query 的 trace。"""
+    from settings import settings as _settings
+    rows = await database.fetch_all(
+        """SELECT t.id, t.session_id, s.name AS session_name,
+                  t.query, t.route, t.iterations, t.duration_ms,
+                  t.tokens_in, t.tokens_out, t.created_at
+           FROM agent_traces t
+           JOIN users u ON u.id = t.user_id
+           LEFT JOIN sessions s ON s.id = t.session_id
+           WHERE u.username = :bot
+           ORDER BY t.created_at DESC LIMIT 20""",
+        values={"bot": _settings.bot_username},
+    )
+    return JSONResponse({"queries": [dict(r) for r in rows]}, headers={"Cache-Control": "no-store"})
