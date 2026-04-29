@@ -30,8 +30,10 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
+    # beat schedule 按 Shanghai 时间解析（如 hour=3 = 北京 03:00）
+    # 但内部时间戳用 UTC，避免跟同 broker 上其它 worker 互相报"时钟漂移"
     timezone="Asia/Shanghai",
-    enable_utc=False,
+    enable_utc=True,
     task_track_started=True,
     task_time_limit=600,           # 单任务最多 10 分钟
     task_soft_time_limit=540,      # 9 分钟软限
