@@ -24,24 +24,22 @@ def ping() -> str:
 def bot_run_daily_queries(self) -> dict:
     """
     机器人每日入口任务。Celery beat 按 beat_schedule 触发。
-    内部完整跑一次 backend.bot.run_bot_daily()——异步流程通过 asyncio.run 桥接同步 Celery。
+    内部跑 backend.bot.run_bot_daily()——异步流程通过 asyncio.run 桥接同步 Celery。
+
+    注意：必须 connect/disconnect 全局 `backend.db.database` 单例，不能创建新实例
+    替换它——其他模块（bot.py / rag.py / agent_chat.py）在 import 时已经各自缓存
+    了对原对象的引用，替换不会生效。
     """
-    # 延迟导入：tasks.py 在 Celery 启动时就被加载，但 backend.bot 的依赖（fastapi/databases）
-    # 不应该在导入时就连 DB——这里到执行时才引入并连接。
-    from databases import Database
-    from settings import settings as _settings
+    # 延迟导入：避免 Celery worker 启动时就触发完整的业务模块加载
+    from .db import database
     from .bot import run_bot_daily
 
     async def _run():
-        db = Database(_settings.database_url)
-        await db.connect()
-        # 全局 database 引用要共享同一个连接池
-        from . import db as db_mod
-        db_mod.database = db
+        await database.connect()
         try:
             return await run_bot_daily()
         finally:
-            await db.disconnect()
+            await database.disconnect()
 
     try:
         result = asyncio.run(_run())
