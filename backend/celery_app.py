@@ -36,11 +36,16 @@ celery_app.conf.update(
     task_time_limit=600,           # 单任务最多 10 分钟
     task_soft_time_limit=540,      # 9 分钟软限
     worker_prefetch_multiplier=1,  # 每次拉一个任务，避免长任务阻塞
+    # 独立 queue + exchange，避免与同机其它项目（如 mine）的 Celery 冲抢任务
+    task_default_queue="tsai",
+    task_default_exchange="tsai",
+    task_default_routing_key="tsai",
     beat_schedule={
         # Phase 3b — 机器人每日按 BOT_RUN_HOUR（默认 3:00）跑 5 个 query
         "bot-daily-queries": {
             "task": "bot_run_daily_queries",
             "schedule": crontab(minute=0, hour=int(os.getenv("BOT_RUN_HOUR", "3"))),
+            "options": {"queue": "tsai"},
         },
     },
 )
