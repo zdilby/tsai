@@ -85,67 +85,67 @@ async def snapshot_user_sessions(source_username: str, target_user_id: int) -> d
     复制 sessions 行 + knowledge_base 行（含 pgvector embedding）。
     messages 不复制。
 
-    幂等性：每次调用都会**追加**新副本。Phase 3b 使用方式是手动调用一次（admin 按钮），
-    重复调用会导致 bot 有重复 session。如果要重置，先清空 bot 现有 sessions。
+    实现关键：所有操作在**单个原生 asyncpg 连接**内完成，注册 vector codec 后
+    SELECT 和 INSERT 对 embedding 列的处理保持一致——避免 databases 库（无 codec）
+    和 raw asyncpg（有 codec）混用导致的类型不匹配。
+
+    幂等性：每次调用都**追加**新副本。重复调用会产生重复 session。
     """
     src = await get_user_by_username(source_username)
     if not src:
         raise ValueError(f"源用户不存在：{source_username!r}")
 
-    # 拉源用户所有 named session
-    src_sessions = await database.fetch_all(
-        "SELECT id, name, persona, system_instruction_origin, system_instruction "
-        "FROM sessions WHERE user_id = :uid AND name IS NOT NULL "
-        "ORDER BY created_at",
-        values={"uid": src["id"]},
-    )
-
-    if not src_sessions:
-        logger.warning("源用户 %r 没有 named session，snapshot 跳过", source_username)
-        return {"sessions_copied": 0, "chunks_copied": 0}
-
     sessions_copied = 0
     chunks_copied = 0
 
-    async with database.transaction():
-        for src_sess in src_sessions:
-            new_sid = str(uuid.uuid4())
-            new_name = f"[bot] {src_sess['name']}"
-            await database.execute(
-                """INSERT INTO sessions (id, user_id, name, persona,
-                                         system_instruction_origin, system_instruction)
-                   VALUES (:id, :uid, :n, :p, :sio, :si)""",
-                values={
-                    "id": new_sid,
-                    "uid": target_user_id,
-                    "n": new_name,
-                    "p": src_sess["persona"],
-                    "sio": src_sess["system_instruction_origin"],
-                    "si": src_sess["system_instruction"],
-                },
-            )
-            sessions_copied += 1
+    async with database._backend._pool.acquire() as conn:
+        await register_vector(conn)
 
-            # 复制 knowledge_base，pgvector 列要走 raw asyncpg
-            chunks = await database.fetch_all(
-                "SELECT content, original_content, source_file, chunk_index, embedding "
-                "FROM knowledge_base WHERE session_id = :sid",
-                values={"sid": str(src_sess["id"])},
-            )
-            if chunks:
-                async with database._backend._pool.acquire() as conn:
-                    await register_vector(conn)
-                    for c in chunks:
-                        await conn.execute(
-                            """INSERT INTO knowledge_base
-                                 (content, original_content, source_file, chunk_index,
-                                  embedding, session_id)
-                               VALUES ($1, $2, $3, $4, $5, $6)""",
-                            c["content"], c["original_content"], c["source_file"],
-                            c["chunk_index"], c["embedding"], uuid.UUID(new_sid),
-                        )
-                chunks_copied += len(chunks)
-            logger.info("Snapshot: %r → %r (%d chunks)", src_sess["name"], new_name, len(chunks))
+        src_sessions = await conn.fetch(
+            "SELECT id, name, persona, system_instruction_origin, system_instruction "
+            "FROM sessions WHERE user_id = $1 AND name IS NOT NULL "
+            "ORDER BY created_at",
+            src["id"],
+        )
+
+        if not src_sessions:
+            logger.warning("源用户 %r 没有 named session，snapshot 跳过", source_username)
+            return {"sessions_copied": 0, "chunks_copied": 0}
+
+        async with conn.transaction():
+            for src_sess in src_sessions:
+                new_sid = uuid.uuid4()
+                new_name = f"[bot] {src_sess['name']}"
+                await conn.execute(
+                    """INSERT INTO sessions (id, user_id, name, persona,
+                                             system_instruction_origin, system_instruction)
+                       VALUES ($1, $2, $3, $4, $5, $6)""",
+                    new_sid, target_user_id, new_name,
+                    src_sess["persona"],
+                    src_sess["system_instruction_origin"],
+                    src_sess["system_instruction"],
+                )
+                sessions_copied += 1
+
+                chunk_rows = await conn.fetch(
+                    "SELECT content, original_content, source_file, chunk_index, embedding "
+                    "FROM knowledge_base WHERE session_id = $1",
+                    src_sess["id"],
+                )
+                for c in chunk_rows:
+                    await conn.execute(
+                        """INSERT INTO knowledge_base
+                             (content, original_content, source_file, chunk_index,
+                              embedding, session_id)
+                           VALUES ($1, $2, $3, $4, $5, $6)""",
+                        c["content"], c["original_content"], c["source_file"],
+                        c["chunk_index"], c["embedding"], new_sid,
+                    )
+                chunks_copied += len(chunk_rows)
+                logger.info(
+                    "Snapshot: %r → %r (%d chunks)",
+                    src_sess["name"], new_name, len(chunk_rows),
+                )
 
     return {"sessions_copied": sessions_copied, "chunks_copied": chunks_copied}
 
