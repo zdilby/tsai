@@ -49,5 +49,12 @@ celery_app.conf.update(
             "schedule": crontab(minute=0, hour=int(os.getenv("BOT_RUN_HOUR", "3"))),
             "options": {"queue": "tsai"},
         },
+        # Phase 3c — Agent B 每 AGENT_B_RUN_HOURS 小时分析一次 trace（默认 12h）
+        # 实际触发时间：相对 worker 启动时刻，每 N 小时一次
+        "agent-b-periodic-analysis": {
+            "task": "agent_b_analyze_pending_traces",
+            "schedule": float(os.getenv("AGENT_B_RUN_HOURS", "12")) * 3600,
+            "options": {"queue": "tsai"},
+        },
     },
 )

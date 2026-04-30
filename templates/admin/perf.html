@@ -105,6 +105,7 @@
                     <th>原因</th>
                     <th>时间</th>
                     <th>预览</th>
+                    <th>操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -116,15 +117,68 @@
                         {% else %}<span class="status-off">○ 历史</span>{% endif %}
                     </td>
                     <td>{{ v.created_by }}</td>
-                    <td>{{ v.reason or '—' }}</td>
+                    <td title="{{ v.reason or '' }}">{{ (v.reason or '—')[:50] }}{% if (v.reason or '')|length > 50 %}…{% endif %}</td>
                     <td>{{ v.created_at.strftime('%m-%d %H:%M') if v.created_at.strftime else v.created_at }}</td>
                     <td>{{ v.preview }}{% if v.preview|length >= 200 %}…{% endif %}</td>
+                    <td>
+                        {% if not v.is_active %}
+                        <button class="btn-small waves-effect waves-light orange btn-rollback" data-vid="{{ v.id }}" data-version="v{{ v.version }}">回滚到此版</button>
+                        {% else %}
+                        —
+                        {% endif %}
+                    </td>
                 </tr>
             {% endfor %}
             </tbody>
         </table>
         {% else %}
         <div class="placeholder">还没有 prompt 版本记录。第一次 /chat AGENT 路径触发后会自动种入 v1。</div>
+        {% endif %}
+    </div>
+
+    <div class="perf-section">
+        <h6>Agent B 控制（自动 prompt 调优，每 {{ agent_b_run_hours }} 小时分析一次）</h6>
+        <div style="margin-bottom:12px;">
+            <button class="btn waves-effect waves-light" id="btn-agent-b-start">启用</button>
+            <button class="btn waves-effect waves-light grey" id="btn-agent-b-stop">停用</button>
+            <button class="btn waves-effect waves-light blue" id="btn-agent-b-run-now">立即分析</button>
+        </div>
+        <div id="agent-b-msg" style="margin-top:8px;color:#616161;font-size:13px;"></div>
+    </div>
+
+    <div class="perf-section">
+        <h6>Agent B 分析历史（最近 20 次）</h6>
+        {% if agent_b_runs %}
+        <table class="striped">
+            <thead>
+                <tr>
+                    <th>开始</th>
+                    <th>结束</th>
+                    <th>分析数</th>
+                    <th>问题数</th>
+                    <th>建议改</th>
+                    <th>已应用</th>
+                    <th>新版本</th>
+                    <th>错误/原因</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for r in agent_b_runs %}
+                <tr>
+                    <td>{{ r.started_at.strftime('%m-%d %H:%M:%S') if r.started_at.strftime else r.started_at }}</td>
+                    <td>{{ r.finished_at.strftime('%H:%M:%S') if r.finished_at and r.finished_at.strftime else (r.finished_at or '运行中') }}</td>
+                    <td>{{ r.traces_analyzed }}</td>
+                    <td>{{ r.issue_count or 0 }}</td>
+                    <td>{% if r.proposed_change %}<span class="status-on">是</span>{% else %}—{% endif %}</td>
+                    <td>{% if r.applied %}<span class="status-on">✓ 是</span>{% else %}{% if r.proposed_change %}<span style="color:#d32f2f">✗ 拒</span>{% else %}—{% endif %}{% endif %}</td>
+                    <td>{% if r.new_prompt_version_id %}v_id={{ r.new_prompt_version_id }}{% else %}—{% endif %}</td>
+                    <td title="{{ r.error_message or '' }}">{{ (r.error_message or '—')[:60] }}{% if (r.error_message or '')|length > 60 %}…{% endif %}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="placeholder">Agent B 还没运行过。启用后等下一个调度周期，或点「立即分析」。</div>
         {% endif %}
     </div>
 
@@ -221,6 +275,63 @@
     };
     document.getElementById('btn-bot-run-now').onclick = (e) =>
         postBot('/admin/bot/run_now', e.target, '已提交 Celery 任务');
+
+    // ── Phase 3c: Agent B 控制按钮 ──
+    const agentBMsg = document.getElementById('agent-b-msg');
+    function showAgentBMsg(text, isErr) {
+        agentBMsg.textContent = text;
+        agentBMsg.style.color = isErr ? '#d32f2f' : '#388e3c';
+    }
+    async function postAgentB(path, btn, successText) {
+        btn.disabled = true;
+        showAgentBMsg('请求中...', false);
+        try {
+            const resp = await fetch(path, { method: 'POST', credentials: 'include' });
+            const data = await resp.json();
+            if (resp.ok && data.success) {
+                showAgentBMsg(successText + (data.task_id ? '（task_id=' + data.task_id + '）' : ''), false);
+                if (path.endsWith('/start') || path.endsWith('/stop')) {
+                    setTimeout(() => location.reload(), 600);
+                }
+            } else {
+                showAgentBMsg('失败：' + (data.error || data.detail || resp.statusText), true);
+            }
+        } catch (e) {
+            showAgentBMsg('请求异常：' + e.message, true);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+    document.getElementById('btn-agent-b-start').onclick = (e) =>
+        postAgentB('/admin/agent_b/start', e.target, '已启用 Agent B 自动分析');
+    document.getElementById('btn-agent-b-stop').onclick = (e) =>
+        postAgentB('/admin/agent_b/stop', e.target, '已停用');
+    document.getElementById('btn-agent-b-run-now').onclick = (e) =>
+        postAgentB('/admin/agent_b/run_now', e.target, '已提交 Agent B 任务');
+
+    // ── Prompt 回滚按钮 ──
+    document.querySelectorAll('.btn-rollback').forEach(btn => {
+        btn.onclick = async (e) => {
+            const vid = btn.dataset.vid;
+            const version = btn.dataset.version;
+            if (!confirm(`确认回滚到 ${version}？这会立即影响所有 /chat AGENT 路径。`)) return;
+            btn.disabled = true;
+            try {
+                const resp = await fetch(`/admin/prompt/rollback/${vid}`, { method: 'POST', credentials: 'include' });
+                const data = await resp.json();
+                if (resp.ok && data.success) {
+                    alert(`已回滚到 ${version}`);
+                    location.reload();
+                } else {
+                    alert('回滚失败：' + (data.error || resp.statusText));
+                }
+            } catch (e) {
+                alert('请求异常：' + e.message);
+            } finally {
+                btn.disabled = false;
+            }
+        };
+    });
 })();
 </script>
 </body>

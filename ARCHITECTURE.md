@@ -453,6 +453,10 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `BOT_USERNAME` | `机器人` | Phase 3b 机器人账号名 |
 | `BOT_SOURCE_USERNAME` | `天书` | Phase 3b session 复刻源（"天书"用户的所有 named session 会被复制给机器人） |
 | `BOT_RUN_HOUR` | `3` | Phase 3b 机器人每日跑 query 的小时（0-23） |
+| `AGENT_B_MODEL` | `gemini-2.5-pro` | Phase 3c Agent B 用的模型（推理质量优先） |
+| `AGENT_B_RUN_HOURS` | `12` | Phase 3c Agent B 触发周期（小时） |
+| `AGENT_B_BATCH_SIZE` | `20` | Phase 3c 单次分析的 trace 数 |
+| `AGENT_B_MIN_TRACES` | `5` | Phase 3c 不足此数时跳过本轮 |
 | `HTTP_PROXY` | — | 可选 HTTP 代理 |
 | `ANTHROPIC_API_KEY` | — | Claude API 密钥（仅 `agent_system/` 子系统使用） |
 
@@ -753,7 +757,7 @@ await register_vector(conn)
 |---|---|---|
 | **3a** | 基础设施：DB 三表、prompt 搬到 DB、trace 自动落盘、admin 页面拆板块、Celery+Redis 骨架 | ✅ 已上线 |
 | **3b** | 机器人用户：复刻"天书"的 session、每日 5 个 query、性能调优页展示数据 | ✅ 已上线 |
-| 3c | Agent B（半自动 → 自动）：扫 `analyzed_at IS NULL` 的 trace、Gemini 分析、改 prompt | ⏳ 待开发 |
+| **3c** | Agent B：每 12 小时分析 agent trace、自动改 prompt（含护栏与回滚）| ✅ 已上线 |
 | 3d | Agent C：prompt 改后跑验证集、计算 score、自动回滚 | ⏳ 待开发 |
 
 ### 评分公式（Agent C 用）
@@ -840,3 +844,72 @@ celery -A backend.celery_app beat -l info -D
 | `POST /admin/bot/snapshot` | 触发一次性 session 复刻 |
 | `POST /admin/bot/run_now` | 立即触发 1 次每日任务（异步，Celery） |
 | `GET  /admin/bot/recent_queries` | 最近 20 条机器人 query 的 JSON |
+
+### 13.2 Agent B：自动 prompt 调优（Phase 3c）
+
+**目标**：每 12 小时扫"未分析的 agent trace"，识别失败模式，**自动**修改 prompt（含安全护栏）。
+
+**关键文件**：
+- `backend/agent_b.py` — 核心：Redis 锁 / Gemini 调用 / patch 应用器 / 5 项护栏 / 24h 频率门控
+- `backend/tasks.py:agent_b_analyze_pending_traces` — Celery 任务包装
+- `backend/celery_app.py` — beat schedule：`agent-b-periodic-analysis` 每 `AGENT_B_RUN_HOURS` 小时一次
+
+**完整流程**：
+
+```
+1. Redis SETNX("agent_b:lock", ex=600s) → 拿不到就跳过
+2. subsystem_status.agent_b.enabled 检查 → 关掉就跳过
+3. agent_b_runs 表 INSERT 一行（记录这次运行）
+4. fetch_pending_agent_traces(limit=20) → route='agent' AND analyzed_at IS NULL
+   不足 AGENT_B_MIN_TRACES（默认 5）则跳过本轮
+5. 当前 active prompt + 20 条 trace → gemini-2.5-pro
+6. Gemini 输出 JSON：issues_found / should_change_prompt / patch
+7. 若 should_change_prompt=true：
+   ├─ has_recent_agent_b_change(24h) ？ → 是则拒绝（频率门控）
+   ├─ apply_patch_to_prompt() → new_content
+   ├─ 5 项护栏校验：
+   │    ├─ 长度 [500, 5000]
+   │    ├─ 必备 section: # 工具 / # 决策优先级 / # 引用纪律 / # 禁止
+   │    ├─ 必备 tool 名: search_kb / read_document / list_documents / web_search / search_history
+   │    └─ diff 大小 ≤ 100% 现版本
+   └─ 通过 → upsert_prompt_version + invalidate_prompt_cache
+8. mark_traces_analyzed(ids) 标记这批 trace
+9. 更新 agent_b_runs 完成行（含失败原因）
+10. heartbeat_subsystem("agent_b", ...)
+11. finally: 释放 Redis 锁
+```
+
+**6 类失败模式标签**（Gemini 用这些分类问题）：
+
+| category | 触发条件 |
+|---|---|
+| `hallucination` | citations 引用了 tools_called result_preview 中找不到的 source/chunk |
+| `wrong_tool` | 该用 search_kb 时用了 web_search（或反过来）|
+| `over_search` | iterations ≥ 5 |
+| `under_search` | iterations=1 且无 tool 调用，但 query 显然需要检索 |
+| `verbatim_query` | search_kb 的 query 跟用户原话 ≥ 80% 相似 |
+| `repeated_call` | 同 tool 同参数 ≥ 2 次 |
+
+**Patch 策略**（Gemini 必须返回的格式）：
+
+```json
+{
+  "issues_found": [{"category": "hallucination", "frequency": 5, "trace_ids": [...]}],
+  "should_change_prompt": true,
+  "patch": {
+    "strategy": "tighten_section",   // 或 rewrite_section / additive
+    "target_section": "# 引用纪律（硬性规则）",
+    "new_section_content": "# 引用纪律（硬性规则）\n（改进的全文）",
+    "reasoning": "5/20 trace 出现 hallucination，原 section 缺乏 verification 步骤..."
+  }
+}
+```
+
+**Agent B 控制端点**：
+
+| Endpoint | 作用 |
+|---|---|
+| `POST /admin/agent_b/start` | 启用周期分析 |
+| `POST /admin/agent_b/stop` | 停用 |
+| `POST /admin/agent_b/run_now` | 立即触发 1 次分析（异步） |
+| `POST /admin/prompt/rollback/{version_id}` | 紧急回滚到指定版本 |

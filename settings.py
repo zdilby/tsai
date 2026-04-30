@@ -48,6 +48,12 @@ class Settings(BaseModel):
     bot_username: str = os.getenv("BOT_USERNAME", "机器人")
     bot_source_username: str = os.getenv("BOT_SOURCE_USERNAME", "天书")
     bot_run_hour: int = int(os.getenv("BOT_RUN_HOUR", "3"))
+    # Phase 3a/3c — Redis & Agent B
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    agent_b_model: str = os.getenv("AGENT_B_MODEL", "gemini-2.5-pro")
+    agent_b_run_hours: float = float(os.getenv("AGENT_B_RUN_HOURS", "12"))
+    agent_b_batch_size: int = int(os.getenv("AGENT_B_BATCH_SIZE", "20"))
+    agent_b_min_traces: int = int(os.getenv("AGENT_B_MIN_TRACES", "5"))
     secret_key: str = os.getenv("SECRET_KEY")
     base_dir: Path = BASE_DIR
 

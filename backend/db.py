@@ -188,6 +188,25 @@ async def init_phase3_tables():
             {"c": component},
         )
 
+    # 4. agent_b_runs (Phase 3c) —— 每次 Agent B 分析的全貌记录
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS agent_b_runs (
+            id SERIAL PRIMARY KEY,
+            started_at TIMESTAMP DEFAULT NOW(),
+            finished_at TIMESTAMP,
+            traces_analyzed INTEGER DEFAULT 0,
+            issues_found JSONB DEFAULT '[]'::jsonb,
+            proposed_change BOOLEAN DEFAULT FALSE,
+            applied BOOLEAN DEFAULT FALSE,
+            new_prompt_version_id INTEGER REFERENCES prompt_versions(id),
+            error_message TEXT
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_b_runs_started
+          ON agent_b_runs(started_at DESC)
+    """)
+
 
 async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
     query = """INSERT INTO messages (session_id, role, content, tokens_in, tokens_out, tokens_total)
@@ -662,3 +681,108 @@ async def heartbeat_subsystem(component: str, last_action: str | None = None):
            WHERE component = :c""",
         values={"c": component, "a": last_action},
     )
+
+
+# ── Phase 3c — Agent B 分析所需的 trace / runs 辅助 ──────────────────────────
+
+async def fetch_pending_agent_traces(limit: int = 20) -> list[dict]:
+    """
+    拉 route='agent' 且尚未被 Agent B 分析的 trace。
+    按 created_at 升序，确保老 trace 优先分析。
+    """
+    rows = await database.fetch_all(
+        """SELECT id, session_id, query, tools_called, iterations,
+                  citations, tokens_in, tokens_out, duration_ms,
+                  prompt_version_id, created_at
+           FROM agent_traces
+           WHERE route = 'agent' AND analyzed_at IS NULL
+           ORDER BY created_at ASC LIMIT :lim""",
+        values={"lim": limit},
+    )
+    return [dict(r) for r in rows]
+
+
+async def mark_traces_analyzed(trace_ids: list[int]):
+    """批量标记 trace 已分析（Agent B 完成后调用）。"""
+    if not trace_ids:
+        return
+    await database.execute(
+        """UPDATE agent_traces SET analyzed_at = NOW()
+           WHERE id = ANY(:ids)""",
+        values={"ids": trace_ids},
+    )
+
+
+async def create_agent_b_run() -> int:
+    """开始一次 Agent B 分析；返回 run_id。"""
+    return await database.fetch_val(
+        "INSERT INTO agent_b_runs DEFAULT VALUES RETURNING id"
+    )
+
+
+async def update_agent_b_run(
+    run_id: int,
+    *,
+    traces_analyzed: int | None = None,
+    issues_found: list | None = None,
+    proposed_change: bool | None = None,
+    applied: bool | None = None,
+    new_prompt_version_id: int | None = None,
+    error_message: str | None = None,
+    finished: bool = False,
+):
+    """部分更新 agent_b_runs 一行（finished=True 时同时设 finished_at）。"""
+    import json as _json
+    sets: list[str] = []
+    values: dict = {"id": run_id}
+    if traces_analyzed is not None:
+        sets.append("traces_analyzed = :ta")
+        values["ta"] = traces_analyzed
+    if issues_found is not None:
+        sets.append("issues_found = CAST(:if AS jsonb)")
+        values["if"] = _json.dumps(issues_found, ensure_ascii=False)
+    if proposed_change is not None:
+        sets.append("proposed_change = :pc")
+        values["pc"] = proposed_change
+    if applied is not None:
+        sets.append("applied = :ap")
+        values["ap"] = applied
+    if new_prompt_version_id is not None:
+        sets.append("new_prompt_version_id = :npv")
+        values["npv"] = new_prompt_version_id
+    if error_message is not None:
+        sets.append("error_message = :em")
+        values["em"] = error_message
+    if finished:
+        sets.append("finished_at = NOW()")
+    if not sets:
+        return
+    await database.execute(
+        f"UPDATE agent_b_runs SET {', '.join(sets)} WHERE id = :id",
+        values=values,
+    )
+
+
+async def has_recent_agent_b_change(hours: int = 24) -> bool:
+    """24 小时频率门控：检查最近 hours 内是否已经成功改过 prompt。"""
+    row = await database.fetch_one(
+        """SELECT 1 FROM prompt_versions
+           WHERE created_by = 'agent_b'
+             AND created_at > NOW() - make_interval(hours := :h)
+           LIMIT 1""",
+        values={"h": hours},
+    )
+    return row is not None
+
+
+async def list_agent_b_runs(limit: int = 30) -> list[dict]:
+    """admin 页面用，列出最近 N 次 Agent B 分析。"""
+    rows = await database.fetch_all(
+        """SELECT id, started_at, finished_at, traces_analyzed,
+                  proposed_change, applied, new_prompt_version_id, error_message,
+                  jsonb_array_length(issues_found) AS issue_count
+           FROM agent_b_runs
+           ORDER BY started_at DESC LIMIT :lim""",
+        values={"lim": limit},
+    )
+    return [dict(r) for r in rows]

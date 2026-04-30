@@ -14,6 +14,7 @@ from backend.db import (
     update_user_max_file_size, update_user_password,
     get_all_invite_codes, create_invite_code,
     get_all_subsystem_status, list_prompt_versions,
+    list_agent_b_runs,
 )
 
 admin_router = APIRouter()
@@ -70,6 +71,8 @@ async def admin_perf(request: Request, admin=Depends(get_current_admin)):
         values={"bot": _settings.bot_username},
     )
 
+    agent_b_runs = await list_agent_b_runs(limit=20)
+
     return templates.TemplateResponse("admin/perf.html", {
         "request": request, "admin": admin,
         "subsystems": subsystems, "traces": traces,
@@ -79,6 +82,8 @@ async def admin_perf(request: Request, admin=Depends(get_current_admin)):
         "bot_session_count": bot_session_count or 0,
         "bot_username": _settings.bot_username,
         "bot_source_username": _settings.bot_source_username,
+        "agent_b_runs": agent_b_runs,
+        "agent_b_run_hours": _settings.agent_b_run_hours,
     })
 
 
@@ -213,3 +218,44 @@ async def bot_recent_queries(admin=Depends(get_current_admin)):
         values={"bot": _settings.bot_username},
     )
     return JSONResponse({"queries": [dict(r) for r in rows]}, headers={"Cache-Control": "no-store"})
+
+
+# ── Phase 3c — Agent B 控制 ────────────────────────────────────────────────
+
+@admin_router.post("/agent_b/start")
+async def agent_b_start(admin=Depends(get_current_admin)):
+    from backend.db import set_subsystem_enabled
+    await set_subsystem_enabled("agent_b", True, status_msg="enabled by admin")
+    return JSONResponse({"success": True, "enabled": True})
+
+
+@admin_router.post("/agent_b/stop")
+async def agent_b_stop(admin=Depends(get_current_admin)):
+    from backend.db import set_subsystem_enabled
+    await set_subsystem_enabled("agent_b", False, status_msg="disabled by admin")
+    return JSONResponse({"success": True, "enabled": False})
+
+
+@admin_router.post("/agent_b/run_now")
+async def agent_b_run_now(admin=Depends(get_current_admin)):
+    """立即触发 Agent B 一次分析（不等 12 小时 beat）。"""
+    from backend.tasks import agent_b_analyze_pending_traces
+    async_result = agent_b_analyze_pending_traces.delay()
+    return JSONResponse({"success": True, "task_id": async_result.id})
+
+
+# ── Phase 3c — Prompt 版本回滚 ────────────────────────────────────────────
+
+@admin_router.post("/prompt/rollback/{version_id}")
+async def prompt_rollback(version_id: int, admin=Depends(get_current_admin)):
+    """
+    把指定 version_id 设为 active，其余 demote。立即失效缓存让所有进程拉新版。
+    用于 Agent B 改坏了的紧急回退。
+    """
+    from backend.db import activate_prompt_version
+    from backend.agent_chat import invalidate_prompt_cache
+    ok = await activate_prompt_version(version_id)
+    if not ok:
+        return JSONResponse({"success": False, "error": "version not found"}, status_code=404)
+    invalidate_prompt_cache()
+    return JSONResponse({"success": True, "active_version_id": version_id})
