@@ -160,6 +160,22 @@ async def list_bot_sessions(bot_user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def list_bot_non_empty_sessions(bot_user_id: int) -> list[dict]:
+    """只返回 KB 里有 chunk 的 bot session。空 session 测不出 RAG/AGENT 路径。"""
+    rows = await database.fetch_all(
+        """SELECT s.id, s.name
+           FROM sessions s
+           WHERE s.user_id = :uid AND s.name IS NOT NULL
+             AND EXISTS (
+                 SELECT 1 FROM knowledge_base kb
+                 WHERE kb.session_id = s.id AND kb.source_file IS NOT NULL
+             )
+           ORDER BY s.created_at""",
+        values={"uid": bot_user_id},
+    )
+    return [dict(r) for r in rows]
+
+
 # ── Query 生成 ──────────────────────────────────────────────────────────────
 
 # 10 个 query 模板，对应早先讨论的测试用例
@@ -181,12 +197,14 @@ _QUERY_TEMPLATES: list[dict] = [
 ]
 
 
-async def select_daily_query_specs(bot_session_id: str, day_seed: int) -> list[dict]:
+async def select_daily_query_specs(bot_session_id: str) -> list[dict]:
     """
-    按日期 seed 从 10 个模板里挑 5 个。需要文件名的模板会从该 session KB 里随机选文件。
+    每次调用都重新抽样 5 个模板（不复用 day_seed —— 同一天多次"立即跑一次"
+    会拿到不同的 query 组合，便于产生更多样的 trace 数据供 Agent B 分析）。
+    需要文件名的模板会从该 session KB 里随机选文件。
     返回 [{"template_id", "kind", "query"}] 5 条。
     """
-    rng = random.Random(day_seed)
+    rng = random.Random()  # 不种子 = 每次抽样都重新随机
     picked = rng.sample(_QUERY_TEMPLATES, k=5)
 
     # 拿一份 session 的所有文件名，供需要的模板填空
@@ -426,20 +444,24 @@ async def run_bot_daily() -> dict:
         logger.info("[bot] subsystem disabled, skipping daily run")
         return {"skipped": True, "reason": "disabled"}
 
-    sessions = await list_bot_sessions(bot["id"])
-    if not sessions:
-        logger.warning("[bot] no sessions to query (run snapshot first)")
-        await heartbeat_subsystem("bot", "skipped: no sessions")
-        return {"skipped": True, "reason": "no_sessions"}
+    # 优先选有 chunk 的 session —— 全空就退化到任意 session（结果都会是 empty_kb，
+    # 但至少 bot 跑过、产生了路由分布数据）
+    non_empty = await list_bot_non_empty_sessions(bot["id"])
+    if non_empty:
+        # 按"年内第几天"轮换，多 session 时每天换一个，确保所有 session 都被覆盖
+        sessions = non_empty
+    else:
+        sessions = await list_bot_sessions(bot["id"])
+        if not sessions:
+            logger.warning("[bot] no sessions to query (run snapshot first)")
+            await heartbeat_subsystem("bot", "skipped: no sessions")
+            return {"skipped": True, "reason": "no_sessions"}
 
     today = datetime.now()
-    day_seed = today.toordinal()
-
-    # 轮换 session（按天）
-    sess = sessions[day_seed % len(sessions)]
+    sess = sessions[today.toordinal() % len(sessions)]
     sess_id = str(sess["id"])
 
-    specs = await select_daily_query_specs(sess_id, day_seed)
+    specs = await select_daily_query_specs(sess_id)
     logger.info(
         "[bot] daily run: session=%r → %d queries: %s",
         sess["name"], len(specs), [s["template_id"] for s in specs],
