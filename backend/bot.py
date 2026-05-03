@@ -448,7 +448,6 @@ async def run_bot_daily() -> dict:
     # 但至少 bot 跑过、产生了路由分布数据）
     non_empty = await list_bot_non_empty_sessions(bot["id"])
     if non_empty:
-        # 按"年内第几天"轮换，多 session 时每天换一个，确保所有 session 都被覆盖
         sessions = non_empty
     else:
         sessions = await list_bot_sessions(bot["id"])
@@ -457,8 +456,9 @@ async def run_bot_daily() -> dict:
             await heartbeat_subsystem("bot", "skipped: no sessions")
             return {"skipped": True, "reason": "no_sessions"}
 
-    today = datetime.now()
-    sess = sessions[today.toordinal() % len(sessions)]
+    # 随机选 session（替代之前的"按日期轮换"）—— 配合每次随机 5 个 query，
+    # 确保连续多次"立即跑一次"产生的交流都是新的：不同 session × 不同 query 组合。
+    sess = random.choice(sessions)
     sess_id = str(sess["id"])
 
     specs = await select_daily_query_specs(sess_id)
