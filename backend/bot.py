@@ -184,14 +184,14 @@ _QUERY_TEMPLATES: list[dict] = [
     # 路由层（不该进 Agent）
     {"id": "greeting",       "tpl": "你好",                                                     "kind": "small_talk"},
     {"id": "thanks",         "tpl": "谢谢",                                                     "kind": "small_talk"},
-    {"id": "short_factual",  "tpl": "这本书叫什么名字",                                         "kind": "rag"},
+    {"id": "short_factual",  "tpl": "这份资料的标题是什么",                                     "kind": "rag"},
     # 工具层（应进 Agent）
     {"id": "list_docs",      "tpl": "我都上传了哪些文档？",                                      "kind": "agent"},
-    {"id": "summary",        "tpl": "请总结一下《{filename}》这本书",       "kind": "agent",     "needs_filename": True},
-    {"id": "compare",        "tpl": "这本书和一般同类作品有什么区别？",                          "kind": "agent"},
+    {"id": "summary",        "tpl": "请总结一下《{filename}》这份资料的核心内容", "kind": "agent", "needs_filename": True},
+    {"id": "compare",        "tpl": "这份资料和一般同类资料有什么区别？",                        "kind": "agent"},
     {"id": "recall",         "tpl": "你还记得我们之前聊过的内容吗？现在情况怎么样了？",            "kind": "agent"},
-    {"id": "open_ended",     "tpl": "请分析一下这本书的写作风格和叙事结构",                       "kind": "agent"},
-    {"id": "multi_question", "tpl": "这本书的主要观点是什么？又是怎么论证的？",                    "kind": "agent"},
+    {"id": "open_ended",     "tpl": "请分析一下这份资料的写作风格和组织结构",                     "kind": "agent"},
+    {"id": "multi_question", "tpl": "这份资料的主要观点是什么？又是怎么论证的？",                  "kind": "agent"},
     # 反幻觉
     {"id": "hallucination",  "tpl": "「天体粒子物理量子重力学方程」在你的资料里是怎么解释的？",     "kind": "agent"},
 ]
