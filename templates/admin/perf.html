@@ -230,8 +230,71 @@
     </div>
 
     <div class="perf-section">
-        <h6>Agent B / Agent C 控制（Phase 3c/3d 启用后激活）</h6>
-        <div class="placeholder">Trace 分析与 Prompt 验证的控制按钮将在 Phase 3c/3d 上线后出现在这里。</div>
+        <h6>Agent C 控制（自动验证 + 回滚，每 {{ agent_c_run_hours }} 小时检查一次）</h6>
+        <p style="color:#616161;font-size:13px;margin:8px 0 12px;">
+            Agent C 仅验证 Agent B 应用的版本（manual / bootstrap 不动）。<br>
+            每个版本至少需 5 条 agent route trace 才能比较；不足时跳过等下次。<br>
+            决策公式：<code>score = -iterations - 5*hallucination_rate - 0.001*latency_ms</code>，<code>delta &lt; 0</code> 即回滚。
+        </p>
+        <div style="margin-bottom:12px;">
+            <button class="btn waves-effect waves-light" id="btn-agent-c-start">启用</button>
+            <button class="btn waves-effect waves-light grey" id="btn-agent-c-stop">停用</button>
+            <button class="btn waves-effect waves-light blue" id="btn-agent-c-run-now">立即验证</button>
+        </div>
+        <div id="agent-c-msg" style="margin-top:8px;color:#616161;font-size:13px;"></div>
+    </div>
+
+    <div class="perf-section">
+        <h6>Agent C 验证历史（最近 20 次）</h6>
+        {% if agent_c_runs %}
+        <table class="striped">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>v_new</th>
+                    <th>v_old</th>
+                    <th>n(新/旧)</th>
+                    <th>score(新/旧)</th>
+                    <th>delta</th>
+                    <th>决策</th>
+                    <th>原因/错误</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for r in agent_c_runs %}
+                <tr>
+                    <td>{{ r.started_at.strftime('%m-%d %H:%M:%S') if r.started_at.strftime else r.started_at }}</td>
+                    <td>{% if r.new_version_num %}v{{ r.new_version_num }}{% else %}—{% endif %}</td>
+                    <td>{% if r.old_version_num %}v{{ r.old_version_num }}{% else %}—{% endif %}</td>
+                    <td>{{ r.new_traces_count or 0 }} / {{ r.old_traces_count or 0 }}</td>
+                    <td>
+                        {% if r.new_avg_score is not none %}
+                        {{ '%.2f' % r.new_avg_score }} / {{ '%.2f' % r.old_avg_score }}
+                        {% else %}—{% endif %}
+                    </td>
+                    <td>
+                        {% if r.score_delta is not none %}
+                            {% if r.score_delta < 0 %}<span style="color:#d32f2f">{{ '%+.2f' % r.score_delta }}</span>
+                            {% else %}<span class="status-on">{{ '%+.2f' % r.score_delta }}</span>{% endif %}
+                        {% else %}—{% endif %}
+                    </td>
+                    <td>
+                        {% if r.decision == 'kept' %}<span class="status-on">✓ 保留</span>
+                        {% elif r.decision == 'rolled_back' %}<span style="color:#d32f2f">↩ 已回滚</span>
+                        {% elif r.decision == 'insufficient_data' %}<span class="status-off">○ 数据不足</span>
+                        {% elif r.decision == 'error' %}<span style="color:#d32f2f">✗ 错误</span>
+                        {% else %}{{ r.decision or '运行中' }}{% endif %}
+                    </td>
+                    <td title="{{ r.decision_reason or r.error_message or '' }}">
+                        {{ (r.decision_reason or r.error_message or '—')[:60] }}{% if (r.decision_reason or r.error_message or '')|length > 60 %}…{% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="placeholder">Agent C 还没运行过。启用后等下一个调度周期，或点「立即验证」。</div>
+        {% endif %}
     </div>
 </div>
 <script src="/static/materialize/js/materialize.min.js"></script>
@@ -308,6 +371,39 @@
         postAgentB('/admin/agent_b/stop', e.target, '已停用');
     document.getElementById('btn-agent-b-run-now').onclick = (e) =>
         postAgentB('/admin/agent_b/run_now', e.target, '已提交 Agent B 任务');
+
+    // ── Phase 3d: Agent C 控制按钮 ──
+    const agentCMsg = document.getElementById('agent-c-msg');
+    function showAgentCMsg(text, isErr) {
+        agentCMsg.textContent = text;
+        agentCMsg.style.color = isErr ? '#d32f2f' : '#388e3c';
+    }
+    async function postAgentC(path, btn, successText) {
+        btn.disabled = true;
+        showAgentCMsg('请求中...', false);
+        try {
+            const resp = await fetch(path, { method: 'POST', credentials: 'include' });
+            const data = await resp.json();
+            if (resp.ok && data.success) {
+                showAgentCMsg(successText + (data.task_id ? '（task_id=' + data.task_id + '）' : ''), false);
+                if (path.endsWith('/start') || path.endsWith('/stop')) {
+                    setTimeout(() => location.reload(), 600);
+                }
+            } else {
+                showAgentCMsg('失败：' + (data.error || data.detail || resp.statusText), true);
+            }
+        } catch (e) {
+            showAgentCMsg('请求异常：' + e.message, true);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+    document.getElementById('btn-agent-c-start').onclick = (e) =>
+        postAgentC('/admin/agent_c/start', e.target, '已启用 Agent C 自动验证');
+    document.getElementById('btn-agent-c-stop').onclick = (e) =>
+        postAgentC('/admin/agent_c/stop', e.target, '已停用');
+    document.getElementById('btn-agent-c-run-now').onclick = (e) =>
+        postAgentC('/admin/agent_c/run_now', e.target, '已提交 Agent C 任务');
 
     // ── Prompt 回滚按钮 ──
     document.querySelectorAll('.btn-rollback').forEach(btn => {

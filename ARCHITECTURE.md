@@ -457,6 +457,8 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `AGENT_B_RUN_HOURS` | `12` | Phase 3c Agent B 触发周期（小时） |
 | `AGENT_B_BATCH_SIZE` | `20` | Phase 3c 单次分析的 trace 数 |
 | `AGENT_B_MIN_TRACES` | `5` | Phase 3c 不足此数时跳过本轮 |
+| `AGENT_C_RUN_HOURS` | `4` | Phase 3d Agent C 验证周期（小时） |
+| `AGENT_C_MIN_TRACES` | `5` | Phase 3d 每个版本至少这么多 trace 才比较 |
 | `HTTP_PROXY` | — | 可选 HTTP 代理 |
 | `ANTHROPIC_API_KEY` | — | Claude API 密钥（仅 `agent_system/` 子系统使用） |
 
@@ -758,7 +760,7 @@ await register_vector(conn)
 | **3a** | 基础设施：DB 三表、prompt 搬到 DB、trace 自动落盘、admin 页面拆板块、Celery+Redis 骨架 | ✅ 已上线 |
 | **3b** | 机器人用户：复刻"天书"的 session、每日 5 个 query、性能调优页展示数据 | ✅ 已上线 |
 | **3c** | Agent B：每 12 小时分析 agent trace、自动改 prompt（含护栏与回滚）| ✅ 已上线 |
-| 3d | Agent C：prompt 改后跑验证集、计算 score、自动回滚 | ⏳ 待开发 |
+| **3d** | Agent C：每 4 小时验证 prompt 改动效果、score 下降即自动回滚 | ✅ 已上线 |
 
 ### 评分公式（Agent C 用）
 
@@ -913,3 +915,59 @@ celery -A backend.celery_app beat -l info -D
 | `POST /admin/agent_b/stop` | 停用 |
 | `POST /admin/agent_b/run_now` | 立即触发 1 次分析（异步） |
 | `POST /admin/prompt/rollback/{version_id}` | 紧急回滚到指定版本 |
+
+### 13.3 Agent C：自动验证 + 回滚（Phase 3d）
+
+**目标**：Agent B 改 prompt 后，自动评估新版本是不是真的更好——不是就回滚。
+
+**关键文件**：
+- `backend/agent_c.py` — 核心：Redis 锁 / hallucination 反查 / score 计算 / 决策 / rollback
+- `backend/tasks.py:agent_c_verify_prompt_change` — Celery 任务包装
+- `backend/celery_app.py` — beat schedule：`agent-c-periodic-verification` 每 `AGENT_C_RUN_HOURS` 小时一次
+
+**完整流程**：
+
+```
+1. Redis SETNX("agent_c:lock", ex=600s) → 拿不到就跳过
+2. subsystem_status.agent_c.enabled 检查 → 关掉就跳过
+3. 拿当前 active 版本 v_new 和它前一个 v_old
+4. 仅当 v_new.created_by = 'agent_b' 才验证（manual / bootstrap 不动）
+5. fetch_traces_by_version(route='agent') 各拿两侧的 trace
+6. 任一侧 < AGENT_C_MIN_TRACES（默认 5）→ insufficient_data 跳过
+7. 对每条 trace（hallucination_rate IS NULL 的）：
+     • 遍历 citations 中含 (source, chunk) 的引用
+     • is_kb_chunk_real(session, source, chunk) 反查 knowledge_base
+     • rate = fake_count / verifiable_count
+     • update_trace_hallucination_rate 写回
+8. 算两侧均分：
+     score = -iterations - 5*hallucination_rate - 0.001*latency_ms
+9. delta = new_avg - old_avg
+   ├─ delta < 0 → activate_prompt_version(v_old) + invalidate_prompt_cache，decision='rolled_back'
+   └─ delta ≥ 0 → 保留，decision='kept'
+10. agent_c_runs 落盘 + heartbeat
+11. finally: 释放锁
+```
+
+**Agent C 不调任何 LLM**——纯基于已有 trace 数据 + KB 反查，零成本运行。
+
+**与 Agent B 的协作**：
+
+```
+Agent B（每 12h，且 24h 内最多 1 次成功改）   Agent C（每 4h）
+         ↓                                          ↓
+    创建 v2 active                          检测到 v2 是 agent_b 创建
+         ↓                                          ↓
+    bot/真人产生 v2 trace               拉 v_new+v_old trace 算 score
+         ↓                                          ↓
+                                         delta < 0 → 回滚 v2 → v1 active
+                                                    ↓
+                                          24h 后 Agent B 可以再尝试
+```
+
+**Agent C 控制端点**：
+
+| Endpoint | 作用 |
+|---|---|
+| `POST /admin/agent_c/start` | 启用周期验证 |
+| `POST /admin/agent_c/stop` | 停用 |
+| `POST /admin/agent_c/run_now` | 立即触发 1 次验证（异步） |

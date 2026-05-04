@@ -4,9 +4,7 @@ Celery 任务定义。
   ping                              - 联调用
   bot_run_daily_queries             - Phase 3b：机器人每日 5 个 query
   agent_b_analyze_pending_traces    - Phase 3c：每 12 小时分析 trace + 改 prompt
-
-后续阶段添加：
-  agent_c_verify_prompt_change   Phase 3d
+  agent_c_verify_prompt_change      - Phase 3d：每 4 小时验证 prompt 改动 + 自动回滚
 """
 import asyncio
 
@@ -72,4 +70,29 @@ def agent_b_analyze_pending_traces(self) -> dict:
         return result
     except Exception as e:
         logger.exception("[agent_b] task failed")
+        return {"error": str(e)}
+
+
+@celery_app.task(name="agent_c_verify_prompt_change", bind=True)
+def agent_c_verify_prompt_change(self) -> dict:
+    """
+    Agent C 周期任务（每 4 小时由 beat 触发，也可 admin 立即跑）。
+    验证 Agent B 应用的最新 prompt 是否真好；不好就自动回滚。
+    """
+    from .db import database
+    from .agent_c import run_agent_c_verification
+
+    async def _run():
+        await database.connect()
+        try:
+            return await run_agent_c_verification()
+        finally:
+            await database.disconnect()
+
+    try:
+        result = asyncio.run(_run())
+        logger.info("[agent_c] task finished: %s", result)
+        return result
+    except Exception as e:
+        logger.exception("[agent_c] task failed")
         return {"error": str(e)}

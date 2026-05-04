@@ -14,7 +14,7 @@ from backend.db import (
     update_user_max_file_size, update_user_password,
     get_all_invite_codes, create_invite_code,
     get_all_subsystem_status, list_prompt_versions,
-    list_agent_b_runs,
+    list_agent_b_runs, list_agent_c_runs,
 )
 
 admin_router = APIRouter()
@@ -72,6 +72,7 @@ async def admin_perf(request: Request, admin=Depends(get_current_admin)):
     )
 
     agent_b_runs = await list_agent_b_runs(limit=20)
+    agent_c_runs = await list_agent_c_runs(limit=20)
 
     return templates.TemplateResponse("admin/perf.html", {
         "request": request, "admin": admin,
@@ -84,6 +85,8 @@ async def admin_perf(request: Request, admin=Depends(get_current_admin)):
         "bot_source_username": _settings.bot_source_username,
         "agent_b_runs": agent_b_runs,
         "agent_b_run_hours": _settings.agent_b_run_hours,
+        "agent_c_runs": agent_c_runs,
+        "agent_c_run_hours": _settings.agent_c_run_hours,
     })
 
 
@@ -259,3 +262,27 @@ async def prompt_rollback(version_id: int, admin=Depends(get_current_admin)):
         return JSONResponse({"success": False, "error": "version not found"}, status_code=404)
     invalidate_prompt_cache()
     return JSONResponse({"success": True, "active_version_id": version_id})
+
+
+# ── Phase 3d — Agent C 控制 ────────────────────────────────────────────────
+
+@admin_router.post("/agent_c/start")
+async def agent_c_start(admin=Depends(get_current_admin)):
+    from backend.db import set_subsystem_enabled
+    await set_subsystem_enabled("agent_c", True, status_msg="enabled by admin")
+    return JSONResponse({"success": True, "enabled": True})
+
+
+@admin_router.post("/agent_c/stop")
+async def agent_c_stop(admin=Depends(get_current_admin)):
+    from backend.db import set_subsystem_enabled
+    await set_subsystem_enabled("agent_c", False, status_msg="disabled by admin")
+    return JSONResponse({"success": True, "enabled": False})
+
+
+@admin_router.post("/agent_c/run_now")
+async def agent_c_run_now(admin=Depends(get_current_admin)):
+    """立即触发 Agent C 一次验证（不等 4 小时 beat）。"""
+    from backend.tasks import agent_c_verify_prompt_change
+    async_result = agent_c_verify_prompt_change.delay()
+    return JSONResponse({"success": True, "task_id": async_result.id})

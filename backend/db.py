@@ -207,6 +207,29 @@ async def init_phase3_tables():
           ON agent_b_runs(started_at DESC)
     """)
 
+    # 5. agent_c_runs (Phase 3d) —— 验证 + 自动回滚的运行记录
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS agent_c_runs (
+            id SERIAL PRIMARY KEY,
+            started_at TIMESTAMP DEFAULT NOW(),
+            finished_at TIMESTAMP,
+            new_version_id INTEGER REFERENCES prompt_versions(id),
+            old_version_id INTEGER REFERENCES prompt_versions(id),
+            new_traces_count INTEGER DEFAULT 0,
+            old_traces_count INTEGER DEFAULT 0,
+            new_avg_score FLOAT,
+            old_avg_score FLOAT,
+            score_delta FLOAT,
+            decision TEXT,
+            decision_reason TEXT,
+            error_message TEXT
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_c_runs_started
+          ON agent_c_runs(started_at DESC)
+    """)
+
 
 async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
     query = """INSERT INTO messages (session_id, role, content, tokens_in, tokens_out, tokens_total)
@@ -783,6 +806,136 @@ async def list_agent_b_runs(limit: int = 30) -> list[dict]:
                   jsonb_array_length(issues_found) AS issue_count
            FROM agent_b_runs
            ORDER BY started_at DESC LIMIT :lim""",
+        values={"lim": limit},
+    )
+    return [dict(r) for r in rows]
+
+
+# ── Phase 3d — Agent C 验证 + 回滚所需的辅助 ─────────────────────────────────
+
+async def fetch_active_prompt_version_id(name: str) -> int | None:
+    row = await database.fetch_one(
+        "SELECT id FROM prompt_versions WHERE name = :n AND is_active = TRUE LIMIT 1",
+        values={"n": name},
+    )
+    return row["id"] if row else None
+
+
+async def fetch_prompt_version_by_id(version_id: int) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, name, version, is_active, content, created_by, reason, created_at
+           FROM prompt_versions WHERE id = :id""",
+        values={"id": version_id},
+    )
+    return dict(row) if row else None
+
+
+async def fetch_previous_prompt_version_id(name: str, current_id: int) -> int | None:
+    """同 name 下、id 小于 current_id 的最近一个版本——即被 current_id 替换掉的版本。"""
+    row = await database.fetch_one(
+        """SELECT id FROM prompt_versions
+           WHERE name = :n AND id < :cur
+           ORDER BY id DESC LIMIT 1""",
+        values={"n": name, "cur": current_id},
+    )
+    return row["id"] if row else None
+
+
+async def fetch_traces_by_version(version_id: int, route: str = "agent") -> list[dict]:
+    """拿某 prompt 版本下指定 route 的所有 trace。"""
+    rows = await database.fetch_all(
+        """SELECT id, session_id, query, tools_called, iterations, citations,
+                  tokens_in, tokens_out, duration_ms, hallucination_rate,
+                  created_at
+           FROM agent_traces
+           WHERE prompt_version_id = :v AND route = :r
+           ORDER BY created_at""",
+        values={"v": version_id, "r": route},
+    )
+    return [dict(r) for r in rows]
+
+
+async def update_trace_hallucination_rate(trace_id: int, rate: float):
+    """Agent C 反查 KB 后写入一条 trace 的 hallucination_rate。"""
+    await database.execute(
+        "UPDATE agent_traces SET hallucination_rate = :r WHERE id = :id",
+        values={"r": rate, "id": trace_id},
+    )
+
+
+async def is_kb_chunk_real(session_id: str, source_file: str, chunk_index: int) -> bool:
+    """检查 (session, source_file, chunk_index) 是否真在 knowledge_base 中存在。"""
+    row = await database.fetch_one(
+        """SELECT 1 FROM knowledge_base
+           WHERE session_id = :sid AND source_file = :s AND chunk_index = :c
+           LIMIT 1""",
+        values={"sid": session_id, "s": source_file, "c": chunk_index},
+    )
+    return row is not None
+
+
+async def create_agent_c_run(new_version_id: int, old_version_id: int) -> int:
+    return await database.fetch_val(
+        """INSERT INTO agent_c_runs (new_version_id, old_version_id)
+           VALUES (:n, :o) RETURNING id""",
+        values={"n": new_version_id, "o": old_version_id},
+    )
+
+
+async def update_agent_c_run(
+    run_id: int,
+    *,
+    new_traces_count: int | None = None,
+    old_traces_count: int | None = None,
+    new_avg_score: float | None = None,
+    old_avg_score: float | None = None,
+    score_delta: float | None = None,
+    decision: str | None = None,
+    decision_reason: str | None = None,
+    error_message: str | None = None,
+    finished: bool = False,
+):
+    sets: list[str] = []
+    values: dict = {"id": run_id}
+    if new_traces_count is not None:
+        sets.append("new_traces_count = :ntc"); values["ntc"] = new_traces_count
+    if old_traces_count is not None:
+        sets.append("old_traces_count = :otc"); values["otc"] = old_traces_count
+    if new_avg_score is not None:
+        sets.append("new_avg_score = :nas"); values["nas"] = new_avg_score
+    if old_avg_score is not None:
+        sets.append("old_avg_score = :oas"); values["oas"] = old_avg_score
+    if score_delta is not None:
+        sets.append("score_delta = :sd"); values["sd"] = score_delta
+    if decision is not None:
+        sets.append("decision = :dec"); values["dec"] = decision
+    if decision_reason is not None:
+        sets.append("decision_reason = :dr"); values["dr"] = decision_reason
+    if error_message is not None:
+        sets.append("error_message = :em"); values["em"] = error_message
+    if finished:
+        sets.append("finished_at = NOW()")
+    if not sets:
+        return
+    await database.execute(
+        f"UPDATE agent_c_runs SET {', '.join(sets)} WHERE id = :id",
+        values=values,
+    )
+
+
+async def list_agent_c_runs(limit: int = 30) -> list[dict]:
+    """admin 页面用，列出最近 N 次 Agent C 验证决策。"""
+    rows = await database.fetch_all(
+        """SELECT c.id, c.started_at, c.finished_at,
+                  c.new_version_id, c.old_version_id,
+                  pn.version AS new_version_num, po.version AS old_version_num,
+                  c.new_traces_count, c.old_traces_count,
+                  c.new_avg_score, c.old_avg_score, c.score_delta,
+                  c.decision, c.decision_reason, c.error_message
+           FROM agent_c_runs c
+           LEFT JOIN prompt_versions pn ON pn.id = c.new_version_id
+           LEFT JOIN prompt_versions po ON po.id = c.old_version_id
+           ORDER BY c.started_at DESC LIMIT :lim""",
         values={"lim": limit},
     )
     return [dict(r) for r in rows]

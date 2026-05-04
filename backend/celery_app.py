@@ -56,5 +56,11 @@ celery_app.conf.update(
             "schedule": float(os.getenv("AGENT_B_RUN_HOURS", "12")) * 3600,
             "options": {"queue": "tsai"},
         },
+        # Phase 3d — Agent C 每 AGENT_C_RUN_HOURS 小时验证 prompt 改动（默认 4h）
+        "agent-c-periodic-verification": {
+            "task": "agent_c_verify_prompt_change",
+            "schedule": float(os.getenv("AGENT_C_RUN_HOURS", "4")) * 3600,
+            "options": {"queue": "tsai"},
+        },
     },
 )

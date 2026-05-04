@@ -54,6 +54,9 @@ class Settings(BaseModel):
     agent_b_run_hours: float = float(os.getenv("AGENT_B_RUN_HOURS", "12"))
     agent_b_batch_size: int = int(os.getenv("AGENT_B_BATCH_SIZE", "20"))
     agent_b_min_traces: int = int(os.getenv("AGENT_B_MIN_TRACES", "5"))
+    # Phase 3d — Agent C 验证 + 回滚
+    agent_c_run_hours: float = float(os.getenv("AGENT_C_RUN_HOURS", "4"))
+    agent_c_min_traces: int = int(os.getenv("AGENT_C_MIN_TRACES", "5"))
     secret_key: str = os.getenv("SECRET_KEY")
     base_dir: Path = BASE_DIR
 
