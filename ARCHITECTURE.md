@@ -749,6 +749,8 @@ await register_vector(conn)
 
 ## 十三、自主调优子系统（Phase 3）
 
+> **接手者请优先阅读 13.4** —— 那里记录了所有暂定决策、已知设计盲点和"等运行数据再决定的事"。
+
 ### 目标
 
 让 TSAI 的 Agent prompt 能"自己优化自己"——每天机器人跑测试 query → trace 落盘 → Agent B 周期性分析失败模式 → 自动修改 prompt → Agent C 验证效果（坏就回滚）。
@@ -971,3 +973,139 @@ Agent B（每 12h，且 24h 内最多 1 次成功改）   Agent C（每 4h）
 | `POST /admin/agent_c/start` | 启用周期验证 |
 | `POST /admin/agent_c/stop` | 停用 |
 | `POST /admin/agent_c/run_now` | 立即触发 1 次验证（异步） |
+
+### 13.4 已知限制 + 暂定决策 + 待改进项
+
+记录 Phase 3 全期决策的"暂定 / 妥协 / 留作未来改进"事项。每条都注明 **影响**、**当前对策** 和 **触发改进的信号**。未来接手者请优先阅读本节。
+
+#### 13.4.1 Phase 3d.1 — Hallucination 检测设计盲点（**优先级：中**）
+
+**现象**：`agent_c.py:_compute_hallucination_rate` 用"反查 knowledge_base 是否存在 (source, chunk)"作为幻觉判定。但 `agent_traces.citations` 字段记录的是**工具调用返回的 chunks**，这些 chunks 全部来自数据库查询——必然存在。所以 `hallucination_rate` 在实际数据中**几乎恒为 0**。
+
+**真正的"数据层幻觉"应该是**：agent 答案文本里写了"（来源：xxx，第 N 段）"，但 N 段**不在本轮任何 tool 调用结果中**——也就是 agent 凭空编了引用。当前代码没做这个解析。
+
+**影响**：score 公式实际只在用 `iter` + `latency_ms` 两个信号，hallucination 维度名存实亡。多数 Agent B patch（改善引用纪律 / 减少过度搜索）会同时优化 iter 和 latency，所以**当前的判断仍然多数情况下正确**。但当 Agent B 改"答得更准但更慢"这类 patch 时，会误判为更差并回滚。
+
+**暂定对策**：不修。等观察到 `agent_c_runs.decision='rolled_back'` 占比 > 30% 时再修。
+
+**修复方案**（约 50 行代码）：在 `_compute_hallucination_rate` 中：
+1. 拿 `message_id` 对应的答案文本
+2. 用正则解析"（来源：X，第 N 段）"模式
+3. 对照 `tools_called` 各 `result_preview` 中提取出的 `(source, chunk)` 集合
+4. 答案中出现但 tool 结果中没出现的 = 真幻觉
+
+#### 13.4.2 Score 公式的 latency 主导问题（**优先级：低**）
+
+```
+score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
+                                                ─────────────────
+                                                典型贡献 -5 到 -30
+```
+
+各项典型贡献：
+
+| 维度 | 典型范围 | 对 score 贡献 |
+|---|---|---|
+| iterations | 1-6 | -1 到 -6 |
+| hallucination_rate | 0-1 | 0 到 -5 |
+| latency_ms | 5000-30000 | -5 到 -30 |
+
+**latency 数量级最大**，意味着 prompt 改动如果导致延迟轻微上升、但准确性大幅提升，可能仍被判定为更差。
+
+**暂定对策**：暂用现公式。修复 13.4.1 后如果发现 latency 仍然过度主导，调权重：`5*halluc → 10*halluc` 或 `0.001*ms → 0.0005*ms`。
+
+**触发改进信号**：观察一段时间，发现"显然变好的 patch 被回滚了"——log 里 `delta < 0` 但人工评估 v_new 答案明显更好。
+
+#### 13.4.3 needs_agent 启发式覆盖不全（**优先级：低**）
+
+`agent_chat.py:needs_agent` 用关键词匹配判断是否走 Agent 路径。已知漏点：
+
+| 用户原话 | 期望路径 | 实际路径 | 漏掉的关键词 |
+|---|---|---|---|
+| 我都上传了哪些**文档**？ | agent → list_documents | rag | "哪些文档"未匹配 `_LIST_KEYS = ("有哪些","都有什么","列出","列表")` |
+| 我有什么**资料**？ | agent → list_documents | rag | 同上 |
+
+**影响**：本应该用 `list_documents` 工具的 query 走了 RAG，得到的答案靠拼凑文档片段，不如直接列文件名清晰。
+
+**暂定对策**：不修。Phase 3c 上线后如果 Agent B 自己识别到这个失败模式（user_under_search 类型），会自动改 prompt 规则补救。
+
+**修复方案**（5 行代码）：在 `_LIST_KEYS` 中加 `"哪些文"` / `"哪些资料"` / `"哪些文档"` / `"哪些文件"`。但要小心过度触发（"哪些"两字过于宽泛）。
+
+#### 13.4.4 Bot session 选择无"exclude last"（**优先级：很低**）
+
+`bot.py:run_bot_daily` 用 `random.choice(non_empty_sessions)`。3 个 session 时，连续两次"立即跑一次"撞同 session 的概率约 33%。
+
+**影响**：观察某个 session 的 trace 时，可能发现"最近 3 次 run 都在它上面跑"，覆盖率不均。
+
+**暂定对策**：接受。Bot 的目标是"长期覆盖所有 session 产生多样数据"，短期偶尔重复可接受。
+
+**修复方案**：用 `subsystem_status.last_action` 字段记录上次选中的 session_id，下次抽样时排除它。约 10 行。
+
+#### 13.4.5 Bot query 模板池小（**优先级：很低**）
+
+`_QUERY_TEMPLATES` 共 10 条，每次 `sample(5)`，理论组合 C(10,5)=252。多次"立即跑一次"虽然每组 5 条不同，但**跨组完全相同**的概率不为零。
+
+**影响**：长期看 bot 的 query 多样性受限。已通过"`这份资料`"模板泛化（commit `56c1453`）让模板对各种 session 内容都适用，缓解了重复感。
+
+**暂定对策**：不动。10 条够 Phase 3 验证。
+
+**修复方案**：3 条路径：
+1. 扩展模板池到 20+（人工增补）
+2. 让 Gemini 基于 session 内容动态生成 query（成本高）
+3. 记录最近 N 次 query，强制不重复
+
+#### 13.4.6 Bot snapshot 非幂等（**优先级：低，但要小心**）
+
+`/admin/bot/snapshot` 重复点击会**追加**新的 session 副本，不去重。当前 admin 页面按钮点击有 confirm 弹窗提醒，但没有强校验。
+
+**影响**：误点会产生大量重复 session（"[bot] 历史"、"[bot] 历史"、"[bot] 历史"……），机器人轮换会被稀释。
+
+**暂定对策**：靠 confirm 弹窗 + admin 自觉。生产环境只点过一次。
+
+**修复方案**：在 `snapshot_user_sessions` 入口检查目标用户是否已有 `[bot]` 前缀的 session，有就拒绝（或提供 `--force` 参数）。
+
+#### 13.4.7 Phase 2 步骤 2（SSE 流式 UX）未做（**优先级：低**）
+
+Phase 2 第 1 步（Agent 后端循环 + JSON 响应）已上线。第 2 步是把响应改成 Server-Sent Events，让用户看到 agent 的中间步骤（"正在搜索..."等）实时滚动出来。
+
+**当前体感**：复杂 query 用户等 10-30 秒沉默，然后答案一次性出。**主要靠 needs_agent 路由让 60-70% 简单 query 走 RAG 不进 Agent** 来缓解延迟感知。
+
+**暂定对策**：不做。Phase 2 第 1 步加上路由+提前退出+并行 tool 已经覆盖大部分体感问题。
+
+**触发改进信号**：用户反馈"等太久不知道在干嘛"。
+
+#### 13.4.8 Bot 不复刻消息历史（**设计选择，非缺陷**）
+
+`snapshot_user_sessions` 只复制 `sessions` + `knowledge_base`，**不复制 messages**。机器人持有"天书的 session 副本"+"干净对话历史"。
+
+**理由**：bot 用来产生测试 trace，对话历史从零开始更可控；如果连历史也复刻，"recall" 类 query 测的就是"天书过去聊过什么"——超出测试范围。
+
+**这是设计选择，不打算改。** 写在这里以防有人想改。
+
+#### 13.4.9 Celery 多 worker 共享 broker（**已缓解，无需进一步改进**）
+
+prod 上 TSAI 和另一项目 `mine` 共享 Redis broker。已通过 **独立 queue (`-Q tsai`) + 独立 node 名 (`-n tsai@%h`)** 隔离。`celery inspect ping` 仍显示两个 node 是设计行为（同 broker 广播），**任务路由完全隔离**。
+
+**进一步隔离方案**（如果未来需要）：用不同 Redis DB（`REDIS_URL=redis://localhost:6379/1`），inspect 也只看到自己。
+
+#### 13.4.10 待评估（基于运行数据）
+
+观察期 7-14 天后再决定：
+
+- [ ] `agent_c_runs.decision='rolled_back'` 比例多少？> 30% 触发 13.4.1 修复
+- [ ] Agent B 改动方向是否过窄？（总是改"引用纪律"或"过度搜索"）
+- [ ] Bot 5 个 query/天够不够 Agent B 看出模式？数据少时 Agent B 跳过的次数多不多？
+- [ ] 24h 频率门控是否过严？真有质量倒退时是否要急于回滚而不等 24h？
+
+### 13.5 Phase 3 之外的"智能化"思路（待规划）
+
+Phase 1（full-context 路径）和 Phase 2 第 1 步（Agent ReAct 循环）已落地。完整的 6 个智能化方向中**剩余 4 个**待规划：
+
+| 思路 | 方向 | 适合时机 |
+|---|---|---|
+| 思路 2 | 层级化索引（document → section → chunk）| 单文档 > 500 chunks 时显著提升 |
+| 思路 3 | Hybrid search（BM25 + 向量）+ Cross-encoder rerank | 当前 RAG 召回质量明显不足时 |
+| 思路 5 | 会话长程记忆（滚动摘要 + 实体笔记本）| 长对话出现"前后记不住"问题时 |
+| 思路 6 | 答案验证 & 引用 grounding（拆 claim 反查）| 用户反馈幻觉问题严重时 |
+
+这些方向都是**当 Phase 3 自主调优系统跑稳后**，根据观察到的真实失败模式来选择性引入的。**不要为了上而上**。
