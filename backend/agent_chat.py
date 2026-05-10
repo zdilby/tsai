@@ -93,7 +93,7 @@ _AGENT_TOOL_RULES = """\
 # 工具
 
 ## 1. search_kb(query, top_k)
-向量检索本会话上传文档，返回最相关的片段。这是你的首选工具。
+向量检索本会话上传文档，返回最相关的片段。
 查询写法：不要照抄用户原话，要拆成关键词组合。
   ❌ search_kb("这个方案有什么风险")
   ✓ search_kb("方案 风险 隐患 漏洞")
@@ -107,13 +107,13 @@ _AGENT_TOOL_RULES = """\
 
 ## 3. list_documents()
 列出会话内所有文件名。一次对话最多调 1 次。
-何时用：用户问"我有哪些文件"，或你不确定文件名。
+何时用：用户问"我有哪些文件/资料/文档"，或你不确定文件名。
 
 ## 4. web_search(query)
 Google 搜索外部信息。何时用：
+  - 问题明显属于外部公共知识（榜单、评分、新闻、历史事件、科学常识等）
   - 用户问的是新闻、最新动态、外部公开知识
-  - search_kb 已确认没有相关内容
-不要默认从 web_search 开始——永远先试 search_kb。
+  - search_kb 返回空且判断问题与上传文档无关
 查询语言：中文问题用中文查，英文术语用英文查。
 
 ## 5. search_history(query)
@@ -123,14 +123,25 @@ Google 搜索外部信息。何时用：
 
 # 决策优先级
 
-1. 回忆类提问（含触发词）→ search_history
-2. 内容可能在上传文档里 → search_kb（绝大多数情况）
-3. search_kb 召回不理想 → 换关键词重试 1 次
-4. 用户问"我有哪些文件" → list_documents
-5. 锁定具体文档要细看 → read_document
-6. 仅外部信息能解决 → web_search
+在调用任何工具前，先判断问题性质：
 
-# 查询改写参考（6 个典型场景）
+**A. 明显属于外部公共知识** — 直接 web_search，无需 search_kb
+   识别特征（满足任一）：
+   - 提及外部评分/排名来源（IMDB、豆瓣、烂番茄、Wikipedia 等）
+   - 问的是通用榜单、公共事件、科学常识、历史知识
+   - 问题与"上传文档/资料"无任何关联
+
+**B. 可能在上传文档里** — 先 search_kb，再视结果决定
+   1. 回忆类提问（含触发词）→ search_history
+   2. 内容可能在上传文档里 → search_kb
+   3. search_kb 返回空 → 立即自问："这个问题本来就不可能在我的文档里吗？"
+      - 是 → 直接 web_search 作答，不要再试 search_kb
+      - 否 → 换关键词重试 1 次，仍空则 web_search 或告知"资料里没有"
+   4. 用户问"我有哪些文件/资料" → list_documents
+   5. 锁定具体文档要细看 → read_document
+   6. 仅外部信息能解决 → web_search
+
+# 查询改写参考
 
 | 用户原话 | ❌ 不要 | ✓ 这样 |
 |---|---|---|
@@ -139,22 +150,18 @@ Google 搜索外部信息。何时用：
 | 主角性格怎么样 | search_kb("主角性格怎么样") | search_kb("主角 性格 描写 心理") |
 | 我们之前聊的 X 有关吗 | search_kb("X 有关") | search_history("X") + search_kb("X 关联") |
 | A 和 B 有什么区别 | search_kb("A 和 B 区别") | search_kb("A 定义 特征") + search_kb("B 定义 特征") |
-| 最近 OpenAI 发布了什么 | search_kb("OpenAI 最近发布") | web_search("OpenAI 最新发布 2026") |
-
-# 重试策略
-
-- 一次 search_kb 拉空 → 换关键词角度再试 1 次（同义词 / 上下位概念）
-- 累计 3 次 search_kb 仍无果 → 切 web_search 或如实告知"资料里没找到"
-- 相同工具相同参数不得调用第二次
+| 最近 OpenAI 发布了什么 | search_kb("OpenAI 最近发布") | web_search("OpenAI 最新发布 2025") |
+| IMDB 最佳历史片有哪些 | search_kb("历史片 IMDB") | web_search("IMDB 历史题材电影 top10") |
 
 # 提前退出（重要！延迟优化）
 
-如果 search_kb 返回了 distance < 0.3 的强匹配证据，**立即给答案**，不要继续调工具。
-信息已经充分时不要为求"更完整"而多调工具——延迟会显著增加。
+- 外部知识问题：web_search 返回结果后立即给答案，不要再调 KB 工具
+- search_kb 返回了 distance < 0.3 的强匹配证据：立即给答案，不要继续调工具
+- 信息已经充分时不要为求"更完整"而多调工具——延迟会显著增加
 
 # 预算
 
-- 整个对话最多 6 次工具调用
+- 整个对话最多 {max_iterations} 次工具调用
 - 接近上限时优先给答案，不再扩展搜索
 - 信息不全也要回答——明确说"已尽力检索，但..."
 
@@ -175,12 +182,13 @@ Google 搜索外部信息。何时用：
 
 # 禁止
 
-❌ 不调任何工具就回答"这是常识/根据一般规则..."
-   例外：纯寒暄、问候、致谢、闲聊（"你好"/"谢谢"/"在吗"等）可直接回应，无需调工具
+❌ 对明显属于外部公共知识的问题，强行先调 search_kb 浪费工具轮次
+❌ search_kb 连续返回空后仍不切换工具，导致耗尽预算无法作答
 ❌ 用户原话直接当 search_kb 查询
 ❌ 没有依据就编造文件名
 ❌ 引用工具结果里不存在的内容
 ❌ 同一工具同样参数调用 2 次
+   例外：纯寒暄、问候、致谢、闲聊（"你好"/"谢谢"/"在吗"等）可直接回应，无需调工具
 
 # 收尾
 
@@ -215,8 +223,10 @@ async def build_system_prompt(persona: str | None) -> tuple[str, int]:
     """
     拼接 persona（若有）+ 当前 active 的工具规则。
     返回 (full_prompt, prompt_version_id) —— version_id 用于 trace 关联。
+    {max_iterations} 占位符在此处动态注入，使 prompt 与 settings 保持一致。
     """
     rules, version_id = await _get_cached_rules()
+    rules = rules.replace("{max_iterations}", str(settings.agent_max_iterations))
     identity = persona.strip() if persona and persona.strip() else \
         "你是 TSAI 智能助手，能基于用户在本会话上传的文档作答。"
     return f"{identity}\n\n{rules}", version_id
@@ -264,7 +274,7 @@ _TOOLS = [
         ),
         types.FunctionDeclaration(
             name="web_search",
-            description="使用 Google 自定义搜索查询外部网页信息（仅当 KB 内无相关内容时使用）。",
+            description="使用 Google 自定义搜索查询外部网页信息。适用于：外部公共知识（榜单/评分/新闻/常识），或 KB 检索无结果且问题与上传文档无关时。",
             parameters={
                 "type": "object",
                 "properties": {
