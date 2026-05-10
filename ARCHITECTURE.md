@@ -1,7 +1,7 @@
 # TSAI 项目架构文档
 
 > 本文档由 Claude Code 自动生成并维护，随代码变动同步更新。
-> 最后更新：2026-04-28
+> 最后更新：2026-05-11
 
 ---
 
@@ -57,6 +57,7 @@ tsai/
 |---|---|---|
 | `GET` | `/` | 主界面，自动初始化 null Session |
 | `GET` | `/ping` | 健康检查 |
+| `GET` | `/healthz` | 健康检查（同 `/ping`，供负载均衡器使用） |
 | `POST` | `/chat` | 核心对话接口（含 RAG + 网络搜索） |
 | `POST` | `/new_session` | 创建命名 Session |
 | `POST` | `/change_session` | 重命名 Session |
@@ -94,6 +95,7 @@ tsai/
 | `GET` | `/admin/` | 管理员总览（用户 + 邀请码） |
 | `GET` | `/admin/user/{id}` | 用户详情页 |
 | `GET` | `/admin/session/{id}` | Session 详情页 |
+| `POST` | `/admin/user/{id}/set_admin` | 将指定用户提升为管理员 |
 | `POST` | `/admin/user/{id}/max_tokens` | 设置每日 Token 配额 |
 | `POST` | `/admin/user/{id}/max_file_size` | 设置最大文件大小 |
 | `POST` | `/admin/user/{id}/reset_password` | 强制重置密码 |
@@ -403,7 +405,10 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 `/admin/` 是板块选择页，分两个板块：
 
 - **`/admin/users` 用户管理**
-  - 查看 Token 用量统计、调整每日配额和文件大小限制、强制重置密码
+  - 展示**所有用户**（含管理员），管理员用户显示 `管理员` 徽章
+  - 查看 Token 用量统计（今日 / 累计）、文件大小上限列，支持在列表页直接编辑
+  - 调整每日 Token 配额和文件大小限制、强制重置密码
+  - **在 UI 中将任意用户提升为管理员**（`POST /admin/user/{id}/set_admin`）
   - 邀请码：生成新邀请码（UUID 格式）、查看使用状态
 - **`/admin/perf` 性能调优**（Phase 3a 上线）
   - 子系统状态：bot / agent_b / agent_c 的启停 + 心跳
