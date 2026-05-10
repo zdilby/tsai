@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import asyncio
 import uuid
@@ -12,6 +12,7 @@ from backend.db import (
     get_session_messages_detail, get_session_daily_tokens,
     get_session_files, get_session_info, update_user_max_tokens,
     update_user_max_file_size, update_user_password,
+    update_user_admin_status,
     get_all_invite_codes, create_invite_code,
     get_all_subsystem_status, list_prompt_versions,
     list_agent_b_runs, list_agent_c_runs,
@@ -119,6 +120,15 @@ async def session_detail(request: Request, session_id: str, admin=Depends(get_cu
         "request": request, "info": info,
         "messages": messages, "daily": daily, "files": files, "admin": admin,
     })
+
+
+@admin_router.post("/user/{user_id}/set_admin")
+async def set_user_admin(
+    user_id: int,
+    admin=Depends(get_current_admin)
+):
+    await update_user_admin_status(user_id, True)
+    return RedirectResponse(url="/admin/users", status_code=303)
 
 
 @admin_router.post("/user/{user_id}/max_tokens")

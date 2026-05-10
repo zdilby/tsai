@@ -34,6 +34,13 @@ app.include_router(upload_router, prefix="/upload", tags=["upload"])
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
 templates = Jinja2Templates(directory="templates")
 
+# Agent dashboard — local-only (agent_system/ is in .gitignore)
+try:
+    from agent_system.web.router import router as _agent_router
+    app.include_router(_agent_router)
+except ImportError:
+    pass
+
 
 @app.on_event("startup")
 async def startup():
@@ -84,6 +91,11 @@ async def index(request: Request, session_id: str = Query(None), user=Depends(ge
 
 @app.get("/ping")
 async def ping():
+    return {"status": "ok"}
+
+
+@app.get("/healthz")
+async def healthz_endpoint():
     return {"status": "ok"}
 
 

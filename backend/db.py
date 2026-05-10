@@ -351,14 +351,13 @@ async def get_user_today_tokens(user_id: int) -> int:
 
 async def get_all_users_with_stats() -> list:
     query = """
-        SELECT u.id, u.username, u.is_admin, u.max_daily_tokens, u.created_at,
+        SELECT u.id, u.username, u.is_admin, u.max_daily_tokens, u.max_file_size_mb, u.created_at,
                COUNT(DISTINCT CASE WHEN s.name IS NOT NULL THEN s.id END) AS session_count,
                COALESCE(SUM(m.tokens_total), 0) AS total_tokens,
                COALESCE(SUM(CASE WHEN DATE(m.created_at) = CURRENT_DATE THEN m.tokens_total ELSE 0 END), 0) AS today_tokens
         FROM users u
         LEFT JOIN sessions s ON s.user_id = u.id
         LEFT JOIN messages m ON m.session_id = s.id
-        WHERE u.is_admin = FALSE
         GROUP BY u.id
         ORDER BY u.id
     """
@@ -485,6 +484,13 @@ async def update_user_max_file_size(user_id: int, max_file_size_mb: int):
     await database.execute(
         "UPDATE users SET max_file_size_mb = :v WHERE id = :id",
         values={"v": max_file_size_mb, "id": user_id}
+    )
+
+
+async def update_user_admin_status(user_id: int, is_admin_status: bool):
+    await database.execute(
+        "UPDATE users SET is_admin = :v WHERE id = :id",
+        values={"v": is_admin_status, "id": user_id}
     )
 
 

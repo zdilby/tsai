@@ -77,13 +77,29 @@ table a { color: #00897b; }
 
 .compact-table td, .compact-table th { padding: 6px 12px; }
 
-.edit-max-token-btn {
+.edit-max-token-btn,
+.edit-max-file-size-btn {
     cursor: pointer;
     margin-left: 6px;
     font-size: 0.85em;
     opacity: 0.6;
 }
-.edit-max-token-btn:hover { opacity: 1; }
+.edit-max-token-btn:hover,
+.edit-max-file-size-btn:hover { opacity: 1; }
+
+.back-link { display: inline-block; margin-bottom: 16px; color: #1976d2; }
+.admin-role-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: #e3f2fd;
+    color: #1565c0;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.inline-admin-form { display: inline-block; margin-left: 4px; }
+.inline-admin-form button { border: 0; }
 
 /* stat cards */
 .stat-row {
