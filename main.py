@@ -26,12 +26,14 @@ from backend.agent_chat import needs_agent, run_agent_chat
 from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
 from admin import admin_router
+from writing import writing_router
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(account_router, prefix="/account", tags=["account"])
 app.include_router(upload_router, prefix="/upload", tags=["upload"])
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
+app.include_router(writing_router, prefix="/writing", tags=["writing"])
 templates = Jinja2Templates(directory="templates")
 
 # Agent dashboard — local-only (agent_system/ is in .gitignore)
@@ -49,6 +51,8 @@ async def startup():
     # Phase 3a 表是幂等的（IF NOT EXISTS），可安全在每次启动时执行
     from backend.db import init_phase3_tables
     await init_phase3_tables()
+    from backend.db import init_writing_tables
+    await init_writing_tables()
     async with database._backend._pool.acquire() as conn:
         await register_vector(conn)
 
@@ -86,6 +90,7 @@ async def index(request: Request, session_id: str = Query(None), user=Depends(ge
         "request": request, "session_id": session_id,
         "session_exists": session_ex, "user": user["username"],
         "max_file_size_mb": max_file_mb,
+        "can_write": bool(user.get("can_write") or user.get("is_admin")),
     })
 
 
@@ -426,7 +431,7 @@ async def new_null_session(session_id: str, user_id: int):
 
 @app.get("/sessions")
 async def get_sessions(user=Depends(get_current_user)):
-    query = "SELECT id, name FROM sessions WHERE user_id = :uid AND name IS NOT NULL ORDER BY created_at DESC"
+    query = "SELECT id, name FROM sessions WHERE user_id = :uid AND name IS NOT NULL AND (is_writing_session = FALSE OR is_writing_session IS NULL) ORDER BY created_at DESC"
     rows = await database.fetch_all(query, values={"uid": user["id"]})
     return [{"id": r["id"], "name": r["name"]} for r in rows]
 

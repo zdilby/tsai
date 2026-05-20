@@ -15,6 +15,9 @@
     <li class="brand-logo center">TSAI</li>
     <div class="sidenav-footer">
         <button id="new-chat-btn" class="btn waves-effect waves-light modal-trigger" data-target="new-chat-modal">新建对话</button>
+        {% if can_write %}
+        <a id="btn-enter-writing" class="btn indigo waves-effect waves-light" href="/writing/">进入写作</a>
+        {% endif %}
     </div>
 </ul>
 <div class="main">
@@ -62,6 +65,7 @@
     <input type="hidden" id="modal-session-id" value="">
 </form>
 <div id="new-chat-modal" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
     <div class="modal-content" style="padding-bottom: 10px;">
         <h5>新建对话</h5>
         <div class="input-field">
@@ -80,6 +84,7 @@
     </div>
 </div>
 <div id="change-chat-modal" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
     <div class="modal-content" style="padding-bottom: 10px;">
         <h5>修改对话名称</h5>
         <div class="input-field">
@@ -98,6 +103,7 @@
     </div>
 </div>
 <div id="del-chat-modal" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
     <div class="modal-content" style="padding-bottom: 10px;">
         <h5>删除对话</h5>
         <p>确定要删除对话 <span id="delchat-name" style="color:red;font-weight: bold;"></span> 吗？此操作不可撤销。</p>
@@ -108,6 +114,7 @@
     </div>
 </div>
 <div id="table-chat-modal" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
     <div class="modal-content" style="padding-bottom: 10px;">
         <h5>对话「<span id="tablechat-name"></span>」引用资料</h5>
         <ul class="collection" id="collect-modal">
