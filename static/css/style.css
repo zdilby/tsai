@@ -107,10 +107,17 @@ body {
     bottom: 1.5em;
     left: 0;
     width: 100%;
-    text-align: center;
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    padding: 0 12px;
+    box-sizing: border-box;
+}
+#new-chat-btn,
+#btn-enter-writing {
+    border-radius: 4px;
 }
 #new-chat-btn {
-    border-radius: 4px;
     background-color: #e57373e6;
 }
 
