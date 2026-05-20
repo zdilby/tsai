@@ -1,7 +1,7 @@
 # TSAI 项目架构文档
 
 > 本文档由 Claude Code 自动生成并维护，随代码变动同步更新。
-> 最后更新：2026-05-11
+> 最后更新：2026-05-17
 
 ---
 
@@ -30,6 +30,7 @@ tsai/
 ├── main.py               # 核心路由：聊天、Session 管理
 ├── account.py            # 认证路由：登录、注册、改密
 ├── admin.py              # 管理员路由：用户管理、邀请码
+├── writing.py            # 写作模块路由（writing_router，前缀 /writing/）
 ├── settings.py           # 配置加载（.env）、全局 logger
 ├── backend/
 │   ├── db.py             # 全部 SQL 操作与数据库 Schema
@@ -38,7 +39,8 @@ tsai/
 │   ├── tools.py          # 文档解析、分块、网络搜索
 │   └── upload.py         # 文件上传与后台处理
 ├── templates/            # Jinja2 HTML 模板
-│   ├── chat.html         # 主聊天界面
+│   ├── chat.html         # 主聊天界面（sidenav + .main 双栏）
+│   ├── writing.html      # 写作模块界面（#writing-sidebar + .writing-shell 双栏，内含 1fr+300px 网格）
 │   ├── account/          # 登录/注册页
 │   └── admin/            # 管理员后台页
 ├── static/               # CSS、JS、用户上传文件
@@ -88,6 +90,23 @@ tsai/
 | `GET` | `/upload/status/{session_id}` | 查询文件处理状态 |
 | `POST` | `/upload/reprocess` | 重新处理失败文件 |
 
+### 写作模块路由（`writing.py`，前缀 `/writing/`）
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| `GET` | `/writing/` | 写作首页（自动跳转最新任务） |
+| `GET` | `/writing/{task_id}` | 写作任务页面（Jinja2 HTML） |
+| `POST` | `/writing/tasks` | 新建写作任务（同时创建 is_writing_session Session） |
+| `GET` | `/writing/tasks` | 获取用户全部写作任务列表 |
+| `GET` | `/writing/tasks/{task_id}` | 获取单个写作任务详情 |
+| `PATCH` | `/writing/tasks/{task_id}` | 更新写作任务设置（title/word_count/style_req/content_req/outline/reference_files） |
+| `DELETE` | `/writing/tasks/{task_id}` | 删除写作任务 |
+| `GET` | `/writing/tasks/{task_id}/content` | 获取最新写作内容（+version 号） |
+| `POST` | `/writing/tasks/{task_id}/content` | 保存写作内容（版本化，保留最近 3 版） |
+| `GET` | `/writing/files` | 获取当前用户所有已处理完成的文件（供参考资料选择） |
+| `GET` | `/writing/tasks/{task_id}/generate_outline` | SSE 流式生成内容大纲 |
+| `POST` | `/writing/tasks/{task_id}/generate_content` | SSE 流式生成/优化写作内容（含 RAG 参考资料检索） |
+
 ### 管理员路由（`admin.py`）
 
 | 方法 | 路径 | 功能 |
@@ -111,10 +130,14 @@ tsai/
 users              ← 用户账户（含配额）
   ↓ 1:N
 sessions           ← 对话 Session（含人格）
-  ↓ 1:N             ↓ 1:N             ↓ 1:N
-messages           knowledge_base     upload_files
-（消息 + token      （RAG 知识库       （文件上传状态
- 统计 + 向量索引）    向量分块）          + 处理进度）
+  ↓ 1:N             ↓ 1:N             ↓ 1:N              ↓ 1:1
+messages           knowledge_base     upload_files        writing_tasks
+（消息 + token      （RAG 知识库       （文件上传状态        （写作任务设置
+ 统计 + 向量索引）    向量分块）          + 处理进度）           + session 绑定）
+                                                              ↓ 1:N
+                                                          writing_contents
+                                                          （版本化写作内容
+                                                           最多保留 3 版）
 
 invite_codes       ← 邀请码（独立表）
 ```
@@ -149,6 +172,7 @@ name                      TEXT          -- NULL = 未命名（null session）
 persona                   TEXT          -- 已废弃
 system_instruction_origin TEXT          -- 用户原始人格输入
 system_instruction        TEXT          -- AI 处理后的系统指令
+is_writing_session        BOOLEAN DEFAULT FALSE  -- 写作模块专属 Session，不出现在对话列表
 created_at                TIMESTAMP DEFAULT NOW()
 ```
 
@@ -201,6 +225,35 @@ embedding        vector(768)
 索引：
 - `idx_knowledge_base_session_id` on `session_id`
 - `idx_knowledge_base_hnsw`（HNSW，cosine_ops）
+
+### `writing_tasks`（写作模块）
+
+```sql
+id              UUID PRIMARY KEY DEFAULT gen_random_uuid()
+user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE
+session_id      UUID REFERENCES sessions(id) ON DELETE CASCADE  -- 写作专属 Session
+title           TEXT DEFAULT '未命名写作'
+word_count      INTEGER DEFAULT 0         -- 0 = 不限
+style_req       TEXT DEFAULT ''           -- 风格要求
+content_req     TEXT DEFAULT ''           -- 内容要求
+outline         TEXT DEFAULT ''           -- 内容大纲（可手动修改或 AI 生成）
+reference_files TEXT[] DEFAULT '{}'       -- 参考资料文件名列表（RAG 来源过滤）
+created_at      TIMESTAMP DEFAULT NOW()
+```
+
+索引：`idx_writing_tasks_user_id` on `user_id`
+
+### `writing_contents`（写作模块）
+
+```sql
+id          SERIAL PRIMARY KEY
+task_id     UUID REFERENCES writing_tasks(id) ON DELETE CASCADE
+content     TEXT
+version     INTEGER DEFAULT 1
+created_at  TIMESTAMP DEFAULT NOW()
+```
+
+每个 task 最多保留最近 3 个版本；`save_writing_content` 在版本数超 3 时删除最旧版本（`ORDER BY version ASC LIMIT 1`）。`get_writing_content` 返回最新版本（`ORDER BY version DESC LIMIT 1`）。
 
 ### `prompt_versions`（Phase 3a）
 
@@ -473,16 +526,80 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 
 ## 十、Session 状态说明
 
-Session 有两种状态：
+Session 有三种状态：
 
 - **null session**：`name IS NULL`，访问 `/` 时自动创建，用于匿名浏览，不支持 RAG 和文件上传
 - **named session**：用户通过 `POST /new_session` 创建，支持 RAG、文件上传、角色人格设置
+- **writing session**：`is_writing_session = TRUE`，由写作模块 `create_writing_task()` 自动创建，绑定一个写作任务，**不出现在对话列表**（`GET /sessions` 过滤）
 
-`session_exists()` 通过 `name IS NOT NULL` 判断是否为命名 Session。
+`session_exists()` 通过 `name IS NOT NULL` 判断是否为命名 Session（writing session 有 name，也满足此条件）。
 
 ---
 
-## 十一、Agent 子系统（`agent_system/`）
+## 十一、写作模块（`writing.py` + `templates/writing.html`）
+
+### 概述
+
+写作模块是独立于对话功能的 AI 辅助写作系统，提供结构化的写作任务管理、Markdown 编辑器、AI 生成大纲 / 内容、以及实时 AI 对话修改写作内容的能力。
+
+### 架构设计
+
+- **写作任务**：每个任务对应一条 `writing_tasks` 记录 + 一个绑定的 `is_writing_session` Session
+- **RAG 集成**：写作任务可选择参考文件列表，生成内容时仅从这些文件的知识库 chunk 中检索
+- **AI 对话修改**：利用现有 `/chat` 接口，在绑定的 writing session 中对话，AI 用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` markers 包裹新内容，前端自动检测并更新编辑器
+- **内容版本化**：每次保存写作内容都生成新版本，数据库保留最近 3 版
+
+### 前端布局（`templates/writing.html`）
+
+**页面顶层结构**（镜像 `chat.html`）：`<body>` 在桌面端为 flex 行，由 `style.css` 统一控制。
+
+```
+body (flex row, ≥993px)
+├── #slide-out        — 移动端滑出侧边栏（桌面隐藏），含 TSAI 品牌 + 新建写作/进入对话按钮
+├── #writing-sidebar  — 桌面常驻左侧面板，flex: 0 0 260px（移动端隐藏）
+│   ├── .writing-sidebar-brand "TSAI"  (64px，与 nav 高度对齐，视觉交叉于左上角)
+│   ├── #writing-list  (写作任务列表，flex-grow: 1)
+│   └── .writing-sidebar-actions  (新建写作 pinkish + 进入对话 indigo，居中排列)
+└── .writing-shell    — flex: 1，内容区
+    ├── <nav>         — 白色 top-nav，结构与 chat.html 完全一致
+    └── .writing-layout  (grid: 1fr 300px)
+        ├── #writing-main    — Markdown 编辑器（双模式）+ 底部字数统计
+        └── #writing-settings — 写作设置面板 + AI 对话面板
+```
+
+**响应式断点**：
+- `≥993px`：`#writing-sidebar` 显示（260px），`#slide-out` 隐藏
+- `≤992px`：`#writing-sidebar` 隐藏，`#slide-out` 可通过汉堡菜单唤出；`#writing-settings` 隐藏；`.writing-layout` 变为单列
+- `≤600px`：全单列，`.writing-layout` 高度重算
+
+**modal 样式**：所有 5 个 modal 均有 × 关闭按钮；取消按钮 `waves-red btn-flat`，确定按钮 `waves-green btn-flat`，与 `chat.html` 一致。
+
+| 区域 | ID | 内容 |
+|---|---|---|
+| 左侧任务列表 | `#writing-sidebar` | TSAI 品牌 + 写作任务列表 + 新建/进入对话按钮 |
+| 主窗口 | `#writing-main` | Markdown 编辑器（双模式：预览/编辑）+ 底部字数统计 |
+| 右侧面板 | `#writing-settings` | 写作设置（标题/字数/风格/内容/大纲/参考资料）+ AI 对话面板 |
+
+**双模式编辑器**：
+- 预览模式（`#content-preview`）：`marked.js` 渲染 Markdown + `DOMPurify` XSS 防护；点击进入编辑
+- 编辑模式（`#content-textarea`）：原始 Markdown 文本；底部显示放弃/保存按钮
+- `enterEditMode()` / `exitEditMode(newContent)` 管理状态切换
+
+**AI 对话面板**（`#ai-chat-panel`）：
+- `chatSessionId` 指向当前写作任务的绑定 Session
+- 发送消息调用 `/chat` POST（FormData），携带 `session_id` + `source_files`
+- 检测 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]`：自动抽取新内容 → `exitEditMode()` + 自动保存
+
+### 关键实现细节
+
+- **写作 Session 隔离**：`GET /sessions` 增加 `AND (is_writing_session = FALSE OR is_writing_session IS NULL)` 过滤，写作 session 不出现在对话页面
+- **SSE 流式输出**：`generate_outline` 和 `generate_content` 两个端点均返回 `StreamingResponse(media_type="text/event-stream")`，格式 `data: chunk\n\n`，结束标志 `data: [DONE]\n\n`
+- **参考资料 RAG 过滤**：`query_rag()` 支持 `source_files` 参数，只从指定文件的 chunks 中检索
+- **内容流式显示**：SSE 流式输出时用 `preview.textContent +=` 追加（安全），流完成后调用 `exitEditMode()` 渲染 Markdown
+
+---
+
+## 十二、Agent 子系统（`agent_system/`）
 
 **目标**：自动读取、修改、测试、迭代 TSAI 项目代码——完整的 plan→act→observe→reflect→repeat 闭环（Harness 模式），并分阶段输出带时间戳的进度反馈。
 
@@ -738,7 +855,7 @@ Verdict 映射（`orchestrator._status_to_verdict`）：
 
 ---
 
-## 十二、pgvector 特殊访问方式
+## 十三、pgvector 特殊访问方式
 
 `databases` 库不支持 pgvector 原生类型，每次向量读写前需手动从连接池获取 asyncpg 原始连接并注册 codec：
 
@@ -752,7 +869,7 @@ await register_vector(conn)
 
 ---
 
-## 十三、自主调优子系统（Phase 3）
+## 十四、自主调优子系统（Phase 3）
 
 > **接手者请优先阅读 13.4** —— 那里记录了所有暂定决策、已知设计盲点和"等运行数据再决定的事"。
 
@@ -807,7 +924,7 @@ backend/tasks.py         任务定义（3a 仅 ping）
 
 `.env` 配置：`REDIS_URL=redis://localhost:6379/0`
 
-### 13.1 机器人子系统（Phase 3b）
+### 14.1 机器人子系统（Phase 3b）
 
 **目标**：自动产生测试流量验证 prompt 调教效果，无需人工每日手动测。
 
@@ -854,7 +971,7 @@ celery -A backend.celery_app beat -l info -D
 | `POST /admin/bot/run_now` | 立即触发 1 次每日任务（异步，Celery） |
 | `GET  /admin/bot/recent_queries` | 最近 20 条机器人 query 的 JSON |
 
-### 13.2 Agent B：自动 prompt 调优（Phase 3c）
+### 14.2 Agent B：自动 prompt 调优（Phase 3c）
 
 **目标**：每 12 小时扫"未分析的 agent trace"，识别失败模式，**自动**修改 prompt（含安全护栏）。
 
@@ -923,7 +1040,7 @@ celery -A backend.celery_app beat -l info -D
 | `POST /admin/agent_b/run_now` | 立即触发 1 次分析（异步） |
 | `POST /admin/prompt/rollback/{version_id}` | 紧急回滚到指定版本 |
 
-### 13.3 Agent C：自动验证 + 回滚（Phase 3d）
+### 14.3 Agent C：自动验证 + 回滚（Phase 3d）
 
 **目标**：Agent B 改 prompt 后，自动评估新版本是不是真的更好——不是就回滚。
 
@@ -979,11 +1096,11 @@ Agent B（每 12h，且 24h 内最多 1 次成功改）   Agent C（每 4h）
 | `POST /admin/agent_c/stop` | 停用 |
 | `POST /admin/agent_c/run_now` | 立即触发 1 次验证（异步） |
 
-### 13.4 已知限制 + 暂定决策 + 待改进项
+### 14.4 已知限制 + 暂定决策 + 待改进项
 
 记录 Phase 3 全期决策的"暂定 / 妥协 / 留作未来改进"事项。每条都注明 **影响**、**当前对策** 和 **触发改进的信号**。未来接手者请优先阅读本节。
 
-#### 13.4.1 Phase 3d.1 — Hallucination 检测设计盲点（**优先级：中**）
+#### 14.4.1 Phase 3d.1 — Hallucination 检测设计盲点（**优先级：中**）
 
 **现象**：`agent_c.py:_compute_hallucination_rate` 用"反查 knowledge_base 是否存在 (source, chunk)"作为幻觉判定。但 `agent_traces.citations` 字段记录的是**工具调用返回的 chunks**，这些 chunks 全部来自数据库查询——必然存在。所以 `hallucination_rate` 在实际数据中**几乎恒为 0**。
 
@@ -999,7 +1116,7 @@ Agent B（每 12h，且 24h 内最多 1 次成功改）   Agent C（每 4h）
 3. 对照 `tools_called` 各 `result_preview` 中提取出的 `(source, chunk)` 集合
 4. 答案中出现但 tool 结果中没出现的 = 真幻觉
 
-#### 13.4.2 Score 公式的 latency 主导问题（**优先级：低**）
+#### 14.4.2 Score 公式的 latency 主导问题（**优先级：低**）
 
 ```
 score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
@@ -1021,7 +1138,7 @@ score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
 
 **触发改进信号**：观察一段时间，发现"显然变好的 patch 被回滚了"——log 里 `delta < 0` 但人工评估 v_new 答案明显更好。
 
-#### 13.4.3 needs_agent 启发式覆盖不全（**优先级：低**）
+#### 14.4.3 needs_agent 启发式覆盖不全（**优先级：低**）
 
 `agent_chat.py:needs_agent` 用关键词匹配判断是否走 Agent 路径。已知漏点：
 
@@ -1036,7 +1153,7 @@ score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
 
 **修复方案**（5 行代码）：在 `_LIST_KEYS` 中加 `"哪些文"` / `"哪些资料"` / `"哪些文档"` / `"哪些文件"`。但要小心过度触发（"哪些"两字过于宽泛）。
 
-#### 13.4.4 Bot session 选择无"exclude last"（**优先级：很低**）
+#### 14.4.4 Bot session 选择无"exclude last"（**优先级：很低**）
 
 `bot.py:run_bot_daily` 用 `random.choice(non_empty_sessions)`。3 个 session 时，连续两次"立即跑一次"撞同 session 的概率约 33%。
 
@@ -1046,7 +1163,7 @@ score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
 
 **修复方案**：用 `subsystem_status.last_action` 字段记录上次选中的 session_id，下次抽样时排除它。约 10 行。
 
-#### 13.4.5 Bot query 模板池小（**优先级：很低**）
+#### 14.4.5 Bot query 模板池小（**优先级：很低**）
 
 `_QUERY_TEMPLATES` 共 10 条，每次 `sample(5)`，理论组合 C(10,5)=252。多次"立即跑一次"虽然每组 5 条不同，但**跨组完全相同**的概率不为零。
 
@@ -1059,7 +1176,7 @@ score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
 2. 让 Gemini 基于 session 内容动态生成 query（成本高）
 3. 记录最近 N 次 query，强制不重复
 
-#### 13.4.6 Bot snapshot 非幂等（**优先级：低，但要小心**）
+#### 14.4.6 Bot snapshot 非幂等（**优先级：低，但要小心**）
 
 `/admin/bot/snapshot` 重复点击会**追加**新的 session 副本，不去重。当前 admin 页面按钮点击有 confirm 弹窗提醒，但没有强校验。
 
@@ -1069,7 +1186,7 @@ score = -iterations - 5 * hallucination_rate - 0.001 * latency_ms
 
 **修复方案**：在 `snapshot_user_sessions` 入口检查目标用户是否已有 `[bot]` 前缀的 session，有就拒绝（或提供 `--force` 参数）。
 
-#### 13.4.7 Phase 2 步骤 2（SSE 流式 UX）未做（**优先级：低**）
+#### 14.4.7 Phase 2 步骤 2（SSE 流式 UX）未做（**优先级：低**）
 
 Phase 2 第 1 步（Agent 后端循环 + JSON 响应）已上线。第 2 步是把响应改成 Server-Sent Events，让用户看到 agent 的中间步骤（"正在搜索..."等）实时滚动出来。
 
@@ -1079,7 +1196,7 @@ Phase 2 第 1 步（Agent 后端循环 + JSON 响应）已上线。第 2 步是�
 
 **触发改进信号**：用户反馈"等太久不知道在干嘛"。
 
-#### 13.4.8 Bot 不复刻消息历史（**设计选择，非缺陷**）
+#### 14.4.8 Bot 不复刻消息历史（**设计选择，非缺陷**）
 
 `snapshot_user_sessions` 只复制 `sessions` + `knowledge_base`，**不复制 messages**。机器人持有"天书的 session 副本"+"干净对话历史"。
 
@@ -1087,13 +1204,13 @@ Phase 2 第 1 步（Agent 后端循环 + JSON 响应）已上线。第 2 步是�
 
 **这是设计选择，不打算改。** 写在这里以防有人想改。
 
-#### 13.4.9 Celery 多 worker 共享 broker（**已缓解，无需进一步改进**）
+#### 14.4.9 Celery 多 worker 共享 broker（**已缓解，无需进一步改进**）
 
 prod 上 TSAI 和另一项目 `mine` 共享 Redis broker。已通过 **独立 queue (`-Q tsai`) + 独立 node 名 (`-n tsai@%h`)** 隔离。`celery inspect ping` 仍显示两个 node 是设计行为（同 broker 广播），**任务路由完全隔离**。
 
 **进一步隔离方案**（如果未来需要）：用不同 Redis DB（`REDIS_URL=redis://localhost:6379/1`），inspect 也只看到自己。
 
-#### 13.4.10 待评估（基于运行数据）
+#### 14.4.10 待评估（基于运行数据）
 
 观察期 7-14 天后再决定：
 
@@ -1102,7 +1219,7 @@ prod 上 TSAI 和另一项目 `mine` 共享 Redis broker。已通过 **独立 qu
 - [ ] Bot 5 个 query/天够不够 Agent B 看出模式？数据少时 Agent B 跳过的次数多不多？
 - [ ] 24h 频率门控是否过严？真有质量倒退时是否要急于回滚而不等 24h？
 
-### 13.5 Phase 3 之外的"智能化"思路（待规划）
+### 14.5 Phase 3 之外的"智能化"思路（待规划）
 
 Phase 1（full-context 路径）和 Phase 2 第 1 步（Agent ReAct 循环）已落地。完整的 6 个智能化方向中**剩余 4 个**待规划：
 
