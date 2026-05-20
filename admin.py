@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 import asyncio
 import uuid
 
@@ -12,7 +13,7 @@ from backend.db import (
     get_session_messages_detail, get_session_daily_tokens,
     get_session_files, get_session_info, update_user_max_tokens,
     update_user_max_file_size, update_user_password,
-    update_user_admin_status,
+    update_user_admin_status, update_user_writing_permission,
     get_all_invite_codes, create_invite_code,
     get_all_subsystem_status, list_prompt_versions,
     list_agent_b_runs, list_agent_c_runs,
@@ -129,6 +130,16 @@ async def set_user_admin(
 ):
     await update_user_admin_status(user_id, True)
     return RedirectResponse(url="/admin/users", status_code=303)
+
+
+@admin_router.post("/user/{user_id}/set_writing", response_class=JSONResponse)
+async def set_user_writing_permission(
+    user_id: int,
+    can_write: int = Form(...),
+    user: dict = Depends(get_current_admin)
+):
+    await update_user_writing_permission(user_id, bool(can_write))
+    return {"success": True}
 
 
 @admin_router.post("/user/{user_id}/max_tokens")
@@ -255,6 +266,50 @@ async def agent_b_run_now(admin=Depends(get_current_admin)):
     from backend.tasks import agent_b_analyze_pending_traces
     async_result = agent_b_analyze_pending_traces.delay()
     return JSONResponse({"success": True, "task_id": async_result.id})
+
+
+# ── Phase 3c — Prompt 查看 / 手动编辑 / 回滚 ─────────────────────────────
+
+@admin_router.get("/prompt/{version_id}/content")
+async def get_prompt_content(version_id: int, admin=Depends(get_current_admin)):
+    """返回指定版本的完整 prompt 内容，供前端 modal 展示。"""
+    from backend.db import fetch_prompt_version_by_id
+    row = await fetch_prompt_version_by_id(version_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    return JSONResponse({
+        "id": row["id"],
+        "version": row["version"],
+        "content": row["content"],
+        "reason": row["reason"] or "",
+        "created_by": row["created_by"],
+        "is_active": row["is_active"],
+    })
+
+
+class _SavePromptPayload(BaseModel):
+    content: str
+    reason: str = ""
+
+
+@admin_router.post("/prompt/manual")
+async def save_manual_prompt(payload: _SavePromptPayload, admin=Depends(get_current_admin)):
+    """
+    将手动编辑后的内容保存为新版本并立即激活（created_by='manual'）。
+    Agent B 下次运行将以此为基线。
+    """
+    if len(payload.content.strip()) < 100:
+        raise HTTPException(status_code=400, detail="Prompt 内容过短（至少 100 字符）")
+    from backend.db import upsert_prompt_version
+    from backend.agent_chat import PROMPT_NAME, invalidate_prompt_cache
+    version_id = await upsert_prompt_version(
+        PROMPT_NAME,
+        payload.content.strip(),
+        created_by="manual",
+        reason=payload.reason.strip() or "管理员手动编辑",
+    )
+    invalidate_prompt_cache()
+    return JSONResponse({"success": True, "version_id": version_id})
 
 
 # ── Phase 3c — Prompt 版本回滚 ────────────────────────────────────────────

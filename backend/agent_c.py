@@ -18,6 +18,7 @@ Phase 3d — Agent C：验证 Agent B 应用的 prompt 改动是否真的更好�
 """
 import asyncio
 import json
+import re
 
 from redis import Redis
 
@@ -29,13 +30,20 @@ from .db import (
     fetch_previous_prompt_version_id,
     fetch_prompt_version_by_id,
     fetch_traces_by_version,
+    get_message_content,
     get_subsystem_status,
     heartbeat_subsystem,
-    is_kb_chunk_real,
     update_agent_c_run,
     update_trace_hallucination_rate,
 )
 from .agent_chat import PROMPT_NAME, invalidate_prompt_cache
+
+
+# 答案文本中内联引用的正则：（来源：文件名，第N段）
+# 同时兼容全角和半角括号、冒号、逗号
+_CITE_RE = re.compile(r'[（(]来源[：:](.+?)[，,]第\s*(\d+)\s*段[）)]')
+# read_document 结果的文件名提取
+_READ_DOC_RE = re.compile(r'^\[(.+?)\s+全文\]')
 
 
 # ── Redis 锁 ────────────────────────────────────────────────────────────────
@@ -59,37 +67,74 @@ def _release_lock() -> None:
         logger.warning("[agent_c] release_lock failed: %s", e)
 
 
-# ── Hallucination 检测（KB 存在性反查）─────────────────────────────────────
+# ── Hallucination 检测（answer 内联引用 vs. 实际 tool 结果交叉验证）─────────
 
 async def _compute_hallucination_rate(trace: dict) -> float:
     """
-    返回 trace 中"幻觉引用数 / 可校验引用总数"。
-    可校验引用 = citation 同时含 source 和 chunk（None 表示非 KB 来源，跳过）。
+    真实幻觉检测：answer 文本里标注的 （来源：X，第N段） 是否真的来自本轮工具调用。
+
+    逻辑：
+    1. retrieved_pairs = trace["citations"] 中所有 (source, chunk)（search_kb 实际返回的）
+    2. files_fully_read = read_document 调用过的文件名（全文可信，不限 chunk）
+    3. answer 文本 → 正则抽取内联引用 → 对照 retrieved_pairs / files_fully_read
+    4. 出现在 answer 但不在工具结果里 → 幻觉
     """
+    # ── 1. 已检索到的 (source, chunk) 集合 ──────────────────────────────────
     citations = trace.get("citations") or []
     if isinstance(citations, str):
         try:
             citations = json.loads(citations)
         except json.JSONDecodeError:
             citations = []
-    if not citations:
-        return 0.0
 
-    session_id = str(trace["session_id"])
-    verifiable = 0
-    fake = 0
+    retrieved_pairs: set[tuple[str, int]] = set()
     for c in citations:
-        source = c.get("source")
-        chunk = c.get("chunk")
-        if source is None or chunk is None:
-            continue   # 非 KB 引用（如网页 / 历史对话），不计入幻觉率
-        verifiable += 1
-        if not await is_kb_chunk_real(session_id, source, chunk):
-            fake += 1
+        src = c.get("source")
+        chk = c.get("chunk")
+        if src is not None and chk is not None:
+            retrieved_pairs.add((src, int(chk)))
 
-    if verifiable == 0:
+    # ── 2. 通过 read_document 完整读取的文件（该文件所有 chunk 引用均合法）──
+    tools_called = trace.get("tools_called") or []
+    if isinstance(tools_called, str):
+        try:
+            tools_called = json.loads(tools_called)
+        except json.JSONDecodeError:
+            tools_called = []
+
+    files_fully_read: set[str] = set()
+    for call in tools_called:
+        if call.get("tool") == "read_document":
+            m = _READ_DOC_RE.match(call.get("result_preview", ""))
+            if m:
+                files_fully_read.add(m.group(1).strip())
+
+    # 没有任何 KB 访问 → 幻觉检测不适用
+    if not retrieved_pairs and not files_fully_read:
         return 0.0
-    return fake / verifiable
+
+    # ── 3. 取 answer 文本 ────────────────────────────────────────────────────
+    message_id = trace.get("message_id")
+    if not message_id:
+        return 0.0
+
+    answer = await get_message_content(message_id)
+    if not answer:
+        return 0.0
+
+    # ── 4. 解析 answer 中的内联 KB 引用 ─────────────────────────────────────
+    cited_pairs = [
+        (m.group(1).strip(), int(m.group(2)))
+        for m in _CITE_RE.finditer(answer)
+    ]
+    if not cited_pairs:
+        return 0.0
+
+    fake = sum(
+        1 for src, chk in cited_pairs
+        if (src, chk) not in retrieved_pairs and src not in files_fully_read
+    )
+    return fake / len(cited_pairs)
 
 
 async def _backfill_hallucination_rates(traces: list[dict]) -> None:

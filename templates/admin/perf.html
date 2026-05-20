@@ -18,9 +18,38 @@
         .status-on  { color: #43a047; font-weight: 500; }
         .status-off { color: #9e9e9e; }
         .back-link { display: inline-block; margin-bottom: 16px; color: #1976d2; }
+        #prompt-content-editor {
+            height: 400px; font-family: monospace; font-size: 13px;
+            border: 1px solid #e0e0e0; padding: 10px; width: 100%;
+            resize: vertical; border-radius: 4px; box-sizing: border-box;
+            line-height: 1.5;
+        }
     </style>
 </head>
 <body>
+
+<!-- Prompt 查看/编辑 Modal -->
+<div id="modal-prompt-edit" class="modal modal-fixed-footer" style="width:860px;max-width:96vw;max-height:88vh;">
+    <div class="modal-content">
+        <h5 id="modal-prompt-title" style="margin-bottom:4px;">Prompt 查看/编辑</h5>
+        <p id="modal-prompt-meta" style="color:#616161;font-size:13px;margin:0 0 12px;"></p>
+        <label for="prompt-content-editor" style="font-size:12px;color:#9e9e9e;">
+            内容（可直接修改，点「保存为新版本」后生效）
+        </label>
+        <textarea id="prompt-content-editor"></textarea>
+        <div class="input-field" style="margin-top:12px;">
+            <input id="prompt-edit-reason" type="text" maxlength="200">
+            <label for="prompt-edit-reason">变更原因（可选）</label>
+        </div>
+    </div>
+    <div class="modal-footer" style="padding:8px 24px;display:flex;align-items:center;justify-content:space-between;">
+        <span id="prompt-edit-msg" style="font-size:13px;"></span>
+        <span>
+            <a href="#!" class="modal-close waves-effect btn-flat grey-text">取消</a>
+            <button class="btn waves-effect waves-light green darken-1" id="btn-prompt-save">保存为新版本并激活</button>
+        </span>
+    </div>
+</div>
 <nav class="admin-nav">
     <div class="nav-wrapper">
         <span class="brand-text">TSAI · 性能调优</span>
@@ -121,10 +150,9 @@
                     <td>{{ v.created_at.strftime('%m-%d %H:%M') if v.created_at.strftime else v.created_at }}</td>
                     <td>{{ v.preview }}{% if v.preview|length >= 200 %}…{% endif %}</td>
                     <td>
+                        <button class="btn-small waves-effect waves-light blue btn-view-prompt" data-vid="{{ v.id }}" data-version="v{{ v.version }}">查看/编辑</button>
                         {% if not v.is_active %}
                         <button class="btn-small waves-effect waves-light orange btn-rollback" data-vid="{{ v.id }}" data-version="v{{ v.version }}">回滚到此版</button>
-                        {% else %}
-                        —
                         {% endif %}
                     </td>
                 </tr>
@@ -300,6 +328,85 @@
 <script src="/static/materialize/js/materialize.min.js"></script>
 <script>
 (function() {
+    // ── Prompt 查看/编辑 Modal ─────────────────────────────────────────────
+    const _promptModal = M.Modal.init(document.getElementById('modal-prompt-edit'), { dismissible: true });
+
+    async function openPromptModal(vid, versionLabel) {
+        const titleEl  = document.getElementById('modal-prompt-title');
+        const metaEl   = document.getElementById('modal-prompt-meta');
+        const editor   = document.getElementById('prompt-content-editor');
+        const msgEl    = document.getElementById('prompt-edit-msg');
+        const reasonEl = document.getElementById('prompt-edit-reason');
+
+        titleEl.textContent = `Prompt ${versionLabel} 查看/编辑`;
+        metaEl.textContent  = '加载中…';
+        editor.value        = '';
+        msgEl.textContent   = '';
+        reasonEl.value      = '';
+        _promptModal.open();
+
+        try {
+            const resp = await fetch(`/admin/prompt/${vid}/content`, { credentials: 'include' });
+            const data = await resp.json();
+            if (!resp.ok) {
+                metaEl.textContent = '加载失败：' + (data.detail || resp.statusText);
+                return;
+            }
+            const activeLabel = data.is_active ? ' · ✦ 当前激活' : '';
+            metaEl.textContent = `v${data.version} · 创建者：${data.created_by}${activeLabel} · 原因：${data.reason || '—'}`;
+            editor.value = data.content;
+            M.updateTextFields();
+        } catch (e) {
+            metaEl.textContent = '请求异常：' + e.message;
+        }
+    }
+
+    async function savePromptContent() {
+        const editor   = document.getElementById('prompt-content-editor');
+        const reasonEl = document.getElementById('prompt-edit-reason');
+        const msgEl    = document.getElementById('prompt-edit-msg');
+        const btn      = document.getElementById('btn-prompt-save');
+
+        const content = editor.value.trim();
+        if (content.length < 100) {
+            msgEl.style.color = '#d32f2f';
+            msgEl.textContent = '内容过短（至少 100 字符）';
+            return;
+        }
+        btn.disabled = true;
+        msgEl.style.color   = '#616161';
+        msgEl.textContent   = '保存中…';
+
+        try {
+            const resp = await fetch('/admin/prompt/manual', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ content, reason: reasonEl.value.trim() }),
+            });
+            const data = await resp.json();
+            if (resp.ok && data.success) {
+                msgEl.style.color = '#388e3c';
+                msgEl.textContent = `已保存为新版本（id=${data.version_id}），即将刷新…`;
+                setTimeout(() => { _promptModal.close(); location.reload(); }, 1000);
+            } else {
+                msgEl.style.color = '#d32f2f';
+                msgEl.textContent = '保存失败：' + (data.detail || data.error || resp.statusText);
+            }
+        } catch (e) {
+            msgEl.style.color = '#d32f2f';
+            msgEl.textContent = '请求异常：' + e.message;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    document.getElementById('btn-prompt-save').onclick = savePromptContent;
+
+    document.querySelectorAll('.btn-view-prompt').forEach(btn => {
+        btn.onclick = () => openPromptModal(btn.dataset.vid, btn.dataset.version);
+    });
+
     const msgEl = document.getElementById('bot-msg');
     function showMsg(text, isErr) {
         msgEl.textContent = text;

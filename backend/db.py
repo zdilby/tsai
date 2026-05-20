@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 from databases import Database
 from settings import settings
 from pgvector.asyncpg import register_vector, Vector
@@ -231,6 +232,44 @@ async def init_phase3_tables():
     """)
 
 
+async def init_writing_tables():
+    await database.execute("""
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS
+          is_writing_session BOOLEAN NOT NULL DEFAULT FALSE
+    """)
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS writing_tasks (
+          id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          session_id       UUID REFERENCES sessions(id) ON DELETE SET NULL,
+          title            TEXT NOT NULL DEFAULT '',
+          word_count       INTEGER DEFAULT 0,
+          style_req        TEXT DEFAULT '',
+          content_req      TEXT DEFAULT '',
+          outline          TEXT DEFAULT '',
+          reference_files  JSONB NOT NULL DEFAULT '[]',
+          created_at       TIMESTAMP DEFAULT NOW(),
+          updated_at       TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_writing_tasks_user_id ON writing_tasks(user_id)
+    """)
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS writing_contents (
+          id         SERIAL PRIMARY KEY,
+          task_id    UUID NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+          content    TEXT NOT NULL DEFAULT '',
+          version    INTEGER NOT NULL DEFAULT 1,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_writing_contents_task_id ON writing_contents(task_id)
+    """)
+    await database.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_write BOOLEAN NOT NULL DEFAULT FALSE;")
+
+
 async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
     query = """INSERT INTO messages (session_id, role, content, tokens_in, tokens_out, tokens_total)
                VALUES (:session_id, :role, :content, :tokens_in, :tokens_out, :tokens_total)
@@ -351,7 +390,7 @@ async def get_user_today_tokens(user_id: int) -> int:
 
 async def get_all_users_with_stats() -> list:
     query = """
-        SELECT u.id, u.username, u.is_admin, u.max_daily_tokens, u.max_file_size_mb, u.created_at,
+        SELECT u.id, u.username, u.is_admin, u.can_write, u.max_daily_tokens, u.max_file_size_mb, u.created_at,
                COUNT(DISTINCT CASE WHEN s.name IS NOT NULL THEN s.id END) AS session_count,
                COALESCE(SUM(m.tokens_total), 0) AS total_tokens,
                COALESCE(SUM(CASE WHEN DATE(m.created_at) = CURRENT_DATE THEN m.tokens_total ELSE 0 END), 0) AS today_tokens
@@ -491,6 +530,13 @@ async def update_user_admin_status(user_id: int, is_admin_status: bool):
     await database.execute(
         "UPDATE users SET is_admin = :v WHERE id = :id",
         values={"v": is_admin_status, "id": user_id}
+    )
+
+
+async def update_user_writing_permission(user_id: int, can_write: bool) -> None:
+    await database.execute(
+        "UPDATE users SET can_write = :v WHERE id = :id",
+        values={"v": can_write, "id": user_id}
     )
 
 
@@ -850,7 +896,7 @@ async def fetch_previous_prompt_version_id(name: str, current_id: int) -> int | 
 async def fetch_traces_by_version(version_id: int, route: str = "agent") -> list[dict]:
     """拿某 prompt 版本下指定 route 的所有 trace。"""
     rows = await database.fetch_all(
-        """SELECT id, session_id, query, tools_called, iterations, citations,
+        """SELECT id, session_id, message_id, query, tools_called, iterations, citations,
                   tokens_in, tokens_out, duration_ms, hallucination_rate,
                   created_at
            FROM agent_traces
@@ -859,6 +905,15 @@ async def fetch_traces_by_version(version_id: int, route: str = "agent") -> list
         values={"v": version_id, "r": route},
     )
     return [dict(r) for r in rows]
+
+
+async def get_message_content(message_id: int) -> str | None:
+    """返回指定 message 的文本内容，Agent C 幻觉检测用。"""
+    row = await database.fetch_one(
+        "SELECT content FROM messages WHERE id = :id",
+        values={"id": message_id},
+    )
+    return row["content"] if row else None
 
 
 async def update_trace_hallucination_rate(trace_id: int, rate: float):
@@ -945,3 +1000,151 @@ async def list_agent_c_runs(limit: int = 30) -> list[dict]:
         values={"lim": limit},
     )
     return [dict(r) for r in rows]
+
+
+async def create_writing_task(user_id: int, title: str = "") -> tuple[str, str]:
+    session_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    await database.execute(
+        """INSERT INTO sessions (id, user_id, name, is_writing_session)
+           VALUES (:sid, :uid, :name, TRUE)""",
+        values={"sid": session_id, "uid": user_id, "name": "[writing] " + (title or "")},
+    )
+    await database.execute(
+        """INSERT INTO writing_tasks (id, user_id, session_id, title)
+           VALUES (:tid, :uid, :sid, :title)""",
+        values={"tid": task_id, "uid": user_id, "sid": session_id, "title": title or ""},
+    )
+    system_prompt = (
+        f"你是一个写作助手。当前写作任务标题：{title}。\n"
+        "若用户请求你修改写作内容，请先输出修改后的完整内容，格式如下：\n"
+        "[WRITING_UPDATE_START]\n"
+        "（修改后的完整 Markdown 内容）\n"
+        "[WRITING_UPDATE_END]\n"
+        "然后再用一两句话说明做了哪些修改。\n"
+        "若用户只是讨论写作内容，无需输出上述标记，正常回复即可。"
+    )
+    await update_session_instruction(session_id, system_prompt)
+    return task_id, session_id
+
+
+async def get_writing_tasks(user_id: int) -> list[dict]:
+    rows = await database.fetch_all(
+        """SELECT id, title, word_count, created_at, updated_at
+           FROM writing_tasks WHERE user_id = :uid ORDER BY created_at DESC""",
+        values={"uid": user_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_writing_task(task_id: str, user_id: int) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, user_id, session_id, title, word_count, style_req, content_req,
+                  outline, reference_files, created_at, updated_at
+           FROM writing_tasks WHERE id = :tid AND user_id = :uid""",
+        values={"tid": task_id, "uid": user_id},
+    )
+    if not row:
+        return None
+    task = dict(row)
+    refs = task.get("reference_files")
+    if refs is None:
+        task["reference_files"] = []
+    elif isinstance(refs, str):
+        task["reference_files"] = json.loads(refs)
+    return task
+
+
+async def writing_task_owned_by(task_id: str, user_id: int) -> bool:
+    row = await database.fetch_one(
+        "SELECT 1 FROM writing_tasks WHERE id = :tid AND user_id = :uid LIMIT 1",
+        values={"tid": task_id, "uid": user_id},
+    )
+    return row is not None
+
+
+async def update_writing_task(task_id: str, user_id: int, **kwargs) -> bool:
+    allowed = {"title", "word_count", "style_req", "content_req", "outline", "reference_files"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return False
+    sets = []
+    values = {"tid": task_id, "uid": user_id}
+    for key, value in fields.items():
+        if key == "reference_files":
+            sets.append(f"{key} = CAST(:{key} AS jsonb)")
+            values[key] = json.dumps(value or [], ensure_ascii=False)
+        else:
+            sets.append(f"{key} = :{key}")
+            values[key] = value
+    sets.append("updated_at = NOW()")
+    row = await database.fetch_one(
+        f"""UPDATE writing_tasks SET {', '.join(sets)}
+            WHERE id = :tid AND user_id = :uid RETURNING id""",
+        values=values,
+    )
+    return row is not None
+
+
+async def delete_writing_task(task_id: str, user_id: int) -> bool:
+    row = await database.fetch_one(
+        "SELECT session_id FROM writing_tasks WHERE id = :tid AND user_id = :uid",
+        values={"tid": task_id, "uid": user_id},
+    )
+    if not row:
+        return False
+    session_id = row["session_id"]
+    deleted = await database.fetch_one(
+        "DELETE FROM writing_tasks WHERE id = :tid AND user_id = :uid RETURNING id",
+        values={"tid": task_id, "uid": user_id},
+    )
+    if deleted and session_id:
+        await database.execute("DELETE FROM sessions WHERE id = :sid", values={"sid": session_id})
+    return deleted is not None
+
+
+async def get_writing_content(task_id: str) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, content, version, created_at FROM writing_contents
+           WHERE task_id = :tid ORDER BY version DESC LIMIT 1""",
+        values={"tid": task_id},
+    )
+    return dict(row) if row else None
+
+
+async def save_writing_content(task_id: str, content: str) -> int:
+    row = await database.fetch_one(
+        "SELECT COALESCE(MAX(version), 0) AS max_version FROM writing_contents WHERE task_id = :tid",
+        values={"tid": task_id},
+    )
+    new_version = int(row["max_version"] or 0) + 1 if row else 1
+    await database.execute(
+        """INSERT INTO writing_contents (task_id, content, version)
+           VALUES (:tid, :content, :version)""",
+        values={"tid": task_id, "content": content or "", "version": new_version},
+    )
+    count = await database.fetch_val(
+        "SELECT COUNT(*) FROM writing_contents WHERE task_id = :tid",
+        values={"tid": task_id},
+    )
+    if count and int(count) > 3:
+        await database.execute(
+            """DELETE FROM writing_contents
+               WHERE id = (
+                 SELECT id FROM writing_contents
+                 WHERE task_id = :tid ORDER BY version ASC, created_at ASC LIMIT 1
+               )""",
+            values={"tid": task_id},
+        )
+    return new_version
+
+
+async def get_user_processed_files(user_id: int) -> list[str]:
+    rows = await database.fetch_all(
+        """SELECT DISTINCT uf.filename
+           FROM upload_files uf JOIN sessions s ON uf.session_id = s.id
+           WHERE s.user_id = :uid AND uf.status = 'done'
+           ORDER BY uf.filename""",
+        values={"uid": user_id},
+    )
+    return [r["filename"] for r in rows]
