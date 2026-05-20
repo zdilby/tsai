@@ -29,9 +29,9 @@ _templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "te
 
 
 async def require_write_access(request: Request, user: dict = Depends(get_current_user)) -> dict:
-    if user.get("is_admin"):
+    if user["is_admin"]:
         return user
-    if not user.get("can_write"):
+    if not user["can_write"]:
         endpoint_name = getattr(request.scope.get("endpoint"), "__name__", "")
         if (
             endpoint_name in {"writing_page", "writing_task_page"}

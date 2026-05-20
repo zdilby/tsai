@@ -90,7 +90,7 @@ async def index(request: Request, session_id: str = Query(None), user=Depends(ge
         "request": request, "session_id": session_id,
         "session_exists": session_ex, "user": user["username"],
         "max_file_size_mb": max_file_mb,
-        "can_write": bool(user.get("can_write") or user.get("is_admin")),
+        "can_write": bool(user["can_write"] or user["is_admin"]),
     })
 
 
