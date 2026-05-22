@@ -71,6 +71,33 @@ MIGRATIONS = [
     # 迁移已有 persona 数据到新字段（不重复处理已迁移行）
     ("sessions.migrate_persona",
      "UPDATE sessions SET system_instruction_origin = persona, system_instruction = persona WHERE persona IS NOT NULL AND system_instruction IS NULL"),
+
+    # writing_tasks 表：分段写作所需字段
+    ("writing_tasks.toc",
+     "ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS toc TEXT DEFAULT ''"),
+    ("writing_tasks.toc_updated_at",
+     "ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS toc_updated_at TIMESTAMPTZ"),
+    ("writing_tasks.outline_updated_at",
+     "ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS outline_updated_at TIMESTAMPTZ"),
+
+    # writing_sections 表：每个分段的内容与状态
+    ("writing_sections.table", """
+        CREATE TABLE IF NOT EXISTS writing_sections (
+            id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id           UUID NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+            section_index     INTEGER NOT NULL DEFAULT 0,
+            heading           TEXT NOT NULL DEFAULT '',
+            sub_outline       TEXT DEFAULT '',
+            content           TEXT DEFAULT '',
+            word_count_target INTEGER DEFAULT 0,
+            status            TEXT NOT NULL DEFAULT 'pending',
+            last_generated_at TIMESTAMPTZ,
+            created_at        TIMESTAMPTZ DEFAULT NOW(),
+            updated_at        TIMESTAMPTZ DEFAULT NOW()
+        )
+    """),
+    ("writing_sections.idx_task_id",
+     "CREATE INDEX IF NOT EXISTS idx_writing_sections_task_id ON writing_sections(task_id, section_index)"),
 ]
 
 
