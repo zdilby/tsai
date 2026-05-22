@@ -393,6 +393,102 @@
             .writing-layout { height: calc(100vh - 64px); }
             #writing-main { min-height: 0; }
         }
+        /* Sections */
+        #sections-container {
+            display: none;
+            padding: 24px 32px;
+            max-width: 820px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        .section-card {
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            background: #fff;
+            overflow: hidden;
+        }
+        .section-card-header {
+            display: flex;
+            align-items: center;
+            padding: 10px 16px;
+            background: #f9f9f9;
+            border-bottom: 1px solid #eee;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .section-card-heading {
+            flex: 1;
+            font-size: 14px;
+            font-weight: 600;
+            color: #1B365D;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .section-status-badge {
+            font-size: 10px;
+            padding: 2px 7px;
+            border-radius: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            flex-shrink: 0;
+        }
+        .section-status-badge.pending  { background: #f5f5f5; color: #9e9e9e; }
+        .section-status-badge.draft    { background: #e3f2fd; color: #1565c0; }
+        .section-status-badge.confirmed{ background: #e8f5e9; color: #2e7d32; }
+        .section-stale-badge {
+            font-size: 10px;
+            padding: 2px 7px;
+            border-radius: 10px;
+            background: #fff3e0;
+            color: #e65100;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .section-card-actions {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .section-card-body {
+            padding: 12px 16px;
+        }
+        .section-content-preview {
+            font-family: 'Source Han Serif SC', 'Noto Serif CJK SC', Georgia, serif;
+            font-size: 14px;
+            line-height: 1.7;
+            color: #333;
+            max-height: 220px;
+            overflow-y: auto;
+            border: 1px solid #f0f0f0;
+            border-radius: 4px;
+            padding: 10px 14px;
+            margin-bottom: 8px;
+            background: #fafafa;
+        }
+        .section-content-preview.expanded { max-height: none; }
+        .section-sub-outline {
+            font-size: 12px;
+            color: #9e9e9e;
+            font-family: monospace;
+            white-space: pre-wrap;
+            margin-bottom: 8px;
+        }
+        .section-footer {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #btn-view-toggle {
+            font-size: 12px;
+            padding: 0 10px;
+            height: 28px;
+            line-height: 28px;
+        }
     </style>
 </head>
 <body>
@@ -443,6 +539,7 @@
             <div id="content-area">
                 <div id="content-preview" class="markdown-body"></div>
                 <textarea id="content-textarea" style="display:none"></textarea>
+                <div id="sections-container"></div>
                 <div id="content-empty" class="content-empty-hint">
                     {% if task_id %}
                     内容加载中...
@@ -453,9 +550,12 @@
             </div>
             <div id="content-footer">
                 <div id="word-count-display">字数：0</div>
-                <div id="footer-actions" style="display:none">
-                    <button id="btn-discard" class="btn grey waves-effect waves-light">放弃</button>
-                    <button id="btn-save-content" class="btn indigo waves-effect waves-light">保存</button>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <button id="btn-view-toggle" class="btn-flat waves-effect" style="display:none;font-size:12px;padding:0 10px;height:28px;line-height:28px">查看全文</button>
+                    <div id="footer-actions" style="display:none">
+                        <button id="btn-discard" class="btn grey waves-effect waves-light">放弃</button>
+                        <button id="btn-save-content" class="btn indigo waves-effect waves-light">保存</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -487,7 +587,11 @@
                         <span class="setting-btn-label">内容大纲</span>
                         <span class="setting-btn-status">未设置</span>
                     </button>
-                    <button id="btn-references" class="setting-btn-item waves-effect" type="button">
+                    <button id="btn-toc" class="setting-btn-item waves-effect" type="button">
+                        <span class="setting-btn-label">写作目录</span>
+                        <span class="setting-btn-status">未设置</span>
+                    </button>
+                    <button id="btn-references" class="setting-btn-item waves-effect" type="button" style="grid-column:span 2">
                         <span class="setting-btn-label">参考资料</span>
                         <span class="setting-btn-status">未选择</span>
                     </button>
@@ -589,11 +693,30 @@
         <p style="font-size:12px;color:#9e9e9e;margin-bottom:8px">可手动编辑，或点击「生成大纲」由 AI 自动生成</p>
         <textarea id="outline-textarea" class="browser-default" style="width:100%;min-height:300px;border:1px solid #e0e0e0;border-radius:4px;padding:10px;font-family:monospace;font-size:13px;resize:vertical"></textarea>
     </div>
-    <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;padding:8px 24px">
-        <button id="btn-gen-outline" class="btn indigo waves-effect waves-light">生成大纲</button>
+    <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;padding:8px 24px;flex-wrap:wrap;gap:4px">
+        <div style="display:flex;gap:6px">
+            <button id="btn-gen-outline" class="btn indigo waves-effect waves-light">生成大纲</button>
+            <button id="btn-gen-outline-from-toc" class="btn indigo lighten-2 waves-effect waves-light" title="从写作目录生成大纲">从目录生成</button>
+        </div>
         <div>
             <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
             <a href="#!" id="btn-save-outline" class="waves-effect waves-green btn-flat">确定</a>
+        </div>
+    </div>
+</div>
+
+<div id="modal-toc" class="modal" style="width:60%;max-height:80%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content">
+        <h5>写作目录</h5>
+        <p style="font-size:12px;color:#9e9e9e;margin-bottom:8px">每行一个章节标题（以 ## 开头或直接写标题），保存后自动生成分段卡片</p>
+        <textarea id="toc-textarea" class="browser-default" style="width:100%;min-height:240px;border:1px solid #e0e0e0;border-radius:4px;padding:10px;font-family:monospace;font-size:13px;resize:vertical" placeholder="## 引言&#10;## 第一章 背景&#10;## 第二章 分析&#10;## 结论"></textarea>
+    </div>
+    <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;padding:8px 24px;flex-wrap:wrap;gap:4px">
+        <button id="btn-gen-toc" class="btn indigo waves-effect waves-light">AI 生成目录</button>
+        <div>
+            <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+            <a href="#!" id="btn-save-toc" class="waves-effect waves-green btn-flat">确定</a>
         </div>
     </div>
 </div>
@@ -639,8 +762,11 @@
         return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
-    let savedSettings = {title: '', word_count: 0, style_req: '', content_req: '', outline: '', reference_files: []};
-    let localSettings = {title: '', word_count: 0, style_req: '', content_req: '', outline: '', reference_files: []};
+    let savedSettings = {title: '', word_count: 0, style_req: '', content_req: '', outline: '', toc: '', reference_files: []};
+    let localSettings = {title: '', word_count: 0, style_req: '', content_req: '', outline: '', toc: '', reference_files: []};
+    let sections = [];   // current sections state
+    let taskTimestamps = {outline_updated_at: null, toc_updated_at: null};
+    let viewMode = 'article'; // 'article' | 'sections'
     let settingsDirty = false;
     let contentSaved = true;
     let editorMode = 'view';
@@ -665,7 +791,12 @@
             style_req: task.style_req || '',
             content_req: task.content_req || '',
             outline: task.outline || '',
+            toc: task.toc || '',
             reference_files: task.reference_files || []
+        };
+        taskTimestamps = {
+            outline_updated_at: task.outline_updated_at || null,
+            toc_updated_at: task.toc_updated_at || null,
         };
         localSettings = Object.assign({}, savedSettings, {reference_files: savedSettings.reference_files.slice()});
         document.getElementById('setting-title').value = localSettings.title;
@@ -687,6 +818,10 @@
         outlineBtn.classList.toggle('has-value', !!localSettings.outline);
         outlineBtn.querySelector('.setting-btn-status').textContent = localSettings.outline ? '已有大纲' : '未设置';
 
+        const tocBtn = document.getElementById('btn-toc');
+        tocBtn.classList.toggle('has-value', !!localSettings.toc);
+        tocBtn.querySelector('.setting-btn-status').textContent = localSettings.toc ? '已设置' : '未设置';
+
         const refBtn = document.getElementById('btn-references');
         const refCount = localSettings.reference_files.length;
         refBtn.classList.toggle('has-value', refCount > 0);
@@ -706,6 +841,7 @@
             const cd = await cr.json();
             exitEditMode(cd.content || '');
 
+            await loadSections(taskId);
             await loadChatHistory(task.session_id);
         } catch (e) {
             console.error('加载任务失败', e);
@@ -832,6 +968,235 @@
         } catch (e) {
             preview.innerHTML = prevHTML;
             M.toast({html: '排版失败：' + e.message, classes: 'orange'});
+        }
+    }
+
+    // ---- Sections ----
+
+    async function loadSections(taskId) {
+        if (!taskId) return;
+        try {
+            const r = await fetch(`/writing/tasks/${taskId}/sections`);
+            if (!r.ok) return;
+            sections = await r.json();
+        } catch (e) {
+            sections = [];
+        }
+        renderSectionsContent();
+        updateViewToggle();
+    }
+
+    function statusLabel(status) {
+        const map = {pending: '待生成', draft: '草稿', confirmed: '已确认', archived: '已归档'};
+        return map[status] || status;
+    }
+
+    function isSectionStale(sec) {
+        if (!sec.last_generated_at) return false;
+        const gen = new Date(sec.last_generated_at);
+        const outlineTs = taskTimestamps.outline_updated_at ? new Date(taskTimestamps.outline_updated_at) : null;
+        const tocTs = taskTimestamps.toc_updated_at ? new Date(taskTimestamps.toc_updated_at) : null;
+        return (outlineTs && outlineTs > gen) || (tocTs && tocTs > gen);
+    }
+
+    function renderSectionsContent() {
+        const container = document.getElementById('sections-container');
+        if (!sections || sections.length === 0) {
+            container.innerHTML = '';
+            if (viewMode === 'sections') container.style.display = 'block';
+            return;
+        }
+        const confirmedCount = sections.filter(s => s.status === 'confirmed').length;
+        const draftCount = sections.filter(s => s.status === 'draft').length;
+        const mergeDisabled = (confirmedCount + draftCount) === 0;
+
+        container.innerHTML = sections.map((sec, i) => {
+            const statusClass = sec.status || 'pending';
+            const hasContent = !!(sec.content && sec.content.trim());
+            const stale = isSectionStale(sec);
+            const contentHtml = hasContent
+                ? DOMPurify.sanitize(marked.parse(sec.content))
+                : '<span style="color:#bdbdbd;font-size:13px">（尚未生成内容）</span>';
+            const subOutlineHtml = sec.sub_outline
+                ? `<div class="section-sub-outline">${escHtml(sec.sub_outline)}</div>`
+                : '';
+            return `
+            <div class="section-card" id="section-card-${sec.id}">
+                <div class="section-card-header" onclick="toggleSectionCard('${sec.id}')">
+                    <span class="section-card-heading">§${i+1} ${escHtml(sec.heading)}</span>
+                    <span class="section-status-badge ${statusClass}">${statusLabel(sec.status)}</span>
+                    ${stale ? '<span class="section-stale-badge" title="大纲或目录已更新，建议重新生成">⚠ 过期</span>' : ''}
+                    <div class="section-card-actions" onclick="event.stopPropagation()">
+                        <button class="btn-flat waves-effect btn-small" style="padding:0 8px;font-size:12px;color:#5c6bc0" onclick="generateSection('${sec.id}')" title="生成内容">生成</button>
+                        <button class="btn-flat waves-effect btn-small" style="padding:0 8px;font-size:12px" onclick="formatSection('${sec.id}')" title="排版优化" ${hasContent ? '' : 'disabled'}>排版</button>
+                        <button class="btn-flat waves-effect btn-small" style="padding:0 8px;font-size:12px;color:#388e3c" onclick="confirmSection('${sec.id}')" title="标记为已确认" ${hasContent ? '' : 'disabled'}>${sec.status === 'confirmed' ? '取消确认' : '确认'}</button>
+                    </div>
+                </div>
+                <div class="section-card-body" id="section-body-${sec.id}">
+                    ${subOutlineHtml}
+                    <div class="section-content-preview markdown-body" id="section-preview-${sec.id}">${contentHtml}</div>
+                    ${sec.word_count_target > 0 ? `<div style="font-size:11px;color:#bdbdbd;margin-top:4px">目标字数：${sec.word_count_target}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+
+        // Merge button
+        container.innerHTML += `
+        <div style="padding:12px 0 24px;display:flex;justify-content:flex-end;gap:8px;align-items:center">
+            <span style="font-size:12px;color:#9e9e9e">${confirmedCount} 段已确认，${draftCount} 段草稿</span>
+            <button class="btn indigo waves-effect waves-light btn-small" onclick="mergeToFullArticle()" ${mergeDisabled ? 'disabled' : ''} title="将所有草稿/已确认段落合并为完整文章">合并为全文</button>
+        </div>`;
+    }
+
+    function toggleSectionCard(sectionId) {
+        const body = document.getElementById('section-body-' + sectionId);
+        if (body) body.style.display = body.style.display === 'none' ? '' : 'none';
+    }
+
+    async function generateSection(sectionId) {
+        if (!TASK_ID) return;
+        const preview = document.getElementById('section-preview-' + sectionId);
+        const origHtml = preview ? preview.innerHTML : '';
+        if (preview) preview.innerHTML = '<span style="color:#9e9e9e;font-size:13px">生成中...</span>';
+        try {
+            const resp = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}/generate`, {method: 'POST'});
+            if (!resp.ok) throw new Error(await resp.text());
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '', fullContent = '', finished = false;
+            while (!finished) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const chunk = line.slice(6);
+                        if (chunk === '[DONE]') { finished = true; break; }
+                        fullContent += chunk;
+                        if (preview) preview.innerHTML = `<span style="color:#9e9e9e;font-size:13px">生成中... ${fullContent.length} 字</span>`;
+                    }
+                }
+            }
+            await loadSections(TASK_ID);
+            M.toast({html: '段落已生成', classes: 'indigo'});
+        } catch (e) {
+            if (preview) preview.innerHTML = origHtml;
+            M.toast({html: '生成失败：' + e.message, classes: 'red'});
+        }
+    }
+
+    async function formatSection(sectionId) {
+        if (!TASK_ID) return;
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}/format`, {method: 'POST'});
+            if (!r.ok) throw new Error(await r.text());
+            await loadSections(TASK_ID);
+            M.toast({html: '段落排版完成', classes: 'indigo'});
+        } catch (e) {
+            M.toast({html: '排版失败：' + e.message, classes: 'red'});
+        }
+    }
+
+    async function confirmSection(sectionId) {
+        if (!TASK_ID) return;
+        const sec = sections.find(s => s.id === sectionId);
+        const newStatus = (sec && sec.status === 'confirmed') ? 'draft' : 'confirmed';
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({status: newStatus})
+            });
+            if (!r.ok) throw new Error(await r.text());
+            await loadSections(TASK_ID);
+        } catch (e) {
+            M.toast({html: '操作失败：' + e.message, classes: 'red'});
+        }
+    }
+
+    function updateViewToggle() {
+        const btn = document.getElementById('btn-view-toggle');
+        if (!sections || sections.length === 0) {
+            btn.style.display = 'none';
+            return;
+        }
+        btn.style.display = '';
+        btn.textContent = viewMode === 'sections' ? '查看全文' : '分段编辑';
+    }
+
+    function showArticleView() {
+        viewMode = 'article';
+        document.getElementById('sections-container').style.display = 'none';
+        const preview = document.getElementById('content-preview');
+        const empty = document.getElementById('content-empty');
+        if (currentContent) {
+            preview.style.display = 'block';
+            empty.style.display = 'none';
+        } else {
+            preview.style.display = 'none';
+            empty.style.display = 'flex';
+        }
+        updateViewToggle();
+    }
+
+    function showSectionsView() {
+        viewMode = 'sections';
+        document.getElementById('content-preview').style.display = 'none';
+        document.getElementById('content-empty').style.display = 'none';
+        document.getElementById('content-textarea').style.display = 'none';
+        document.getElementById('footer-actions').style.display = 'none';
+        const sc = document.getElementById('sections-container');
+        sc.style.display = 'block';
+        updateViewToggle();
+    }
+
+    async function mergeToFullArticle() {
+        if (!TASK_ID) return;
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/full_content`);
+            if (!r.ok) throw new Error(await r.text());
+            const d = await r.json();
+            if (!d.content) {
+                M.toast({html: '没有可合并的段落内容', classes: 'orange'}); return;
+            }
+            // Save as main article content
+            const sr = await fetch(`/writing/tasks/${TASK_ID}/content`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({content: d.content})
+            });
+            if (!sr.ok) throw new Error('保存失败');
+            currentContent = d.content;
+            M.toast({html: `已合并 ${d.section_count} 个段落为全文，切换到全文视图`, classes: 'indigo'});
+            showArticleView();
+            exitEditMode(d.content);
+        } catch (e) {
+            M.toast({html: '合并失败：' + e.message, classes: 'red'});
+        }
+    }
+
+    // ---- SSE helper ----
+    async function sseStream(url, method, onChunk) {
+        const resp = await fetch(url, {method: method || 'GET'});
+        if (!resp.ok) throw new Error(await resp.text());
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '', finished = false;
+        while (!finished) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, {stream: true});
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const chunk = line.slice(6);
+                    if (chunk === '[DONE]') { finished = true; break; }
+                    onChunk(chunk);
+                }
+            }
         }
     }
 
@@ -986,6 +1351,75 @@
             checkDirty();
             M.Modal.getInstance(document.getElementById('modal-outline')).close();
         });
+        document.getElementById('btn-gen-outline-from-toc').addEventListener('click', async function () {
+            if (!TASK_ID) { M.toast({html: '请先选择写作任务'}); return; }
+            if (!localSettings.toc && !savedSettings.toc) {
+                M.toast({html: '请先设置并保存写作目录', classes: 'orange'}); return;
+            }
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = '生成中...';
+            const textarea = document.getElementById('outline-textarea');
+            textarea.value = '';
+            try {
+                await sseStream(`/writing/tasks/${TASK_ID}/generate_outline_from_toc`, 'POST', chunk => { textarea.value += chunk; });
+                M.toast({html: '大纲生成完成', classes: 'indigo'});
+            } catch (e) {
+                M.toast({html: '生成失败：' + e.message, classes: 'red'});
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '从目录生成';
+            }
+        });
+
+        document.getElementById('btn-toc').addEventListener('click', function () {
+            document.getElementById('toc-textarea').value = localSettings.toc;
+            M.Modal.getInstance(document.getElementById('modal-toc')).open();
+        });
+        document.getElementById('btn-save-toc').addEventListener('click', async function () {
+            const toc = document.getElementById('toc-textarea').value.trim();
+            localSettings.toc = toc;
+            updateSettingButtonLabels();
+            checkDirty();
+            M.Modal.getInstance(document.getElementById('modal-toc')).close();
+            // If TOC is saved and task exists, immediately persist + sync sections
+            if (TASK_ID && toc) {
+                try {
+                    const r = await fetch(`/writing/tasks/${TASK_ID}`, {
+                        method: 'PATCH',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({toc})
+                    });
+                    if (r.ok) {
+                        savedSettings.toc = toc;
+                        settingsDirty = !deepEqual(localSettings, savedSettings);
+                        document.getElementById('btn-save-settings').disabled = !settingsDirty;
+                        await loadSections(TASK_ID);
+                        if (sections.length > 0) showSectionsView();
+                        M.toast({html: `目录已保存，生成 ${sections.length} 个分段`, classes: 'indigo'});
+                    }
+                } catch(e) {
+                    M.toast({html: '目录保存失败', classes: 'red'});
+                }
+            }
+        });
+        document.getElementById('btn-gen-toc').addEventListener('click', async function () {
+            if (!TASK_ID) { M.toast({html: '请先选择写作任务'}); return; }
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = '生成中...';
+            const textarea = document.getElementById('toc-textarea');
+            textarea.value = '';
+            try {
+                await sseStream(`/writing/tasks/${TASK_ID}/generate_toc`, 'POST', chunk => { textarea.value += chunk; });
+                M.toast({html: '目录生成完成', classes: 'indigo'});
+            } catch (e) {
+                M.toast({html: '生成失败：' + e.message, classes: 'red'});
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'AI 生成目录';
+            }
+        });
 
         document.getElementById('btn-gen-outline').addEventListener('click', async function () {
             if (!TASK_ID) { M.toast({html: '请先选择写作任务'}); return; }
@@ -1043,16 +1477,32 @@
             this.disabled = true;
             this.textContent = '保存中...';
             try {
+                // Only send fields that actually changed vs savedSettings to avoid
+                // spurious timestamp updates (e.g. toc_updated_at when toc is unchanged)
+                const changed = {};
+                for (const key of Object.keys(localSettings)) {
+                    if (!deepEqual(localSettings[key], savedSettings[key])) changed[key] = localSettings[key];
+                }
                 const r = await fetch(`/writing/tasks/${TASK_ID}`, {
                     method: 'PATCH',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(localSettings)
+                    body: JSON.stringify(changed)
                 });
                 if (!r.ok) throw new Error(await r.text());
                 savedSettings = Object.assign({}, localSettings, {reference_files: localSettings.reference_files.slice()});
                 settingsDirty = false;
                 M.toast({html: '设置已保存', classes: 'indigo'});
                 checkDirty();
+                // Refresh timestamps so stale badges update immediately
+                const tr = await fetch(`/writing/tasks/${TASK_ID}`);
+                if (tr.ok) {
+                    const td = await tr.json();
+                    taskTimestamps = {
+                        outline_updated_at: td.outline_updated_at || null,
+                        toc_updated_at: td.toc_updated_at || null,
+                    };
+                    renderSectionsContent();
+                }
             } catch (e) {
                 M.toast({html: '保存失败：' + e.message, classes: 'red'});
                 this.disabled = false;
@@ -1204,8 +1654,13 @@
 
     document.addEventListener('DOMContentLoaded', function () {
         M.AutoInit();
-        M.Modal.init(document.querySelectorAll('#modal-style-req, #modal-content-req, #modal-outline, #modal-references'));
+        M.Modal.init(document.querySelectorAll('#modal-style-req, #modal-content-req, #modal-outline, #modal-toc, #modal-references'));
         initSettingsListeners();
+
+        document.getElementById('btn-view-toggle').addEventListener('click', function () {
+            if (viewMode === 'sections') showArticleView();
+            else if (sections && sections.length > 0) showSectionsView();
+        });
         initEditor();
         initChatPanel();
         loadWritingTasks();

@@ -271,6 +271,30 @@ async def init_writing_tables():
         CREATE INDEX IF NOT EXISTS idx_writing_contents_task_id ON writing_contents(task_id)
     """)
     await database.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_write BOOLEAN NOT NULL DEFAULT FALSE;")
+    # --- writing_tasks: toc + version timestamps ---
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS toc TEXT DEFAULT '';")
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS toc_updated_at TIMESTAMPTZ;")
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS outline_updated_at TIMESTAMPTZ;")
+    # --- writing_sections ---
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS writing_sections (
+          id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          task_id           UUID NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+          section_index     INTEGER NOT NULL DEFAULT 0,
+          heading           TEXT NOT NULL DEFAULT '',
+          sub_outline       TEXT DEFAULT '',
+          content           TEXT DEFAULT '',
+          word_count_target INTEGER DEFAULT 0,
+          status            TEXT NOT NULL DEFAULT 'pending',
+          last_generated_at TIMESTAMPTZ,
+          created_at        TIMESTAMPTZ DEFAULT NOW(),
+          updated_at        TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_writing_sections_task_id
+        ON writing_sections(task_id, section_index)
+    """)
 
 
 async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
@@ -1057,7 +1081,8 @@ async def get_writing_tasks(user_id: int) -> list[dict]:
 async def get_writing_task(task_id: str, user_id: int) -> dict | None:
     row = await database.fetch_one(
         """SELECT id, user_id, session_id, title, word_count, style_req, content_req,
-                  outline, reference_files, created_at, updated_at
+                  outline, outline_updated_at, toc, toc_updated_at,
+                  reference_files, created_at, updated_at
            FROM writing_tasks WHERE id = :tid AND user_id = :uid""",
         values={"tid": task_id, "uid": user_id},
     )
@@ -1081,7 +1106,7 @@ async def writing_task_owned_by(task_id: str, user_id: int) -> bool:
 
 
 async def update_writing_task(task_id: str, user_id: int, **kwargs) -> bool:
-    allowed = {"title", "word_count", "style_req", "content_req", "outline", "reference_files"}
+    allowed = {"title", "word_count", "style_req", "content_req", "outline", "toc", "reference_files"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return False
@@ -1094,6 +1119,10 @@ async def update_writing_task(task_id: str, user_id: int, **kwargs) -> bool:
         else:
             sets.append(f"{key} = :{key}")
             values[key] = value
+    if "outline" in fields:
+        sets.append("outline_updated_at = NOW()")
+    if "toc" in fields:
+        sets.append("toc_updated_at = NOW()")
     sets.append("updated_at = NOW()")
     row = await database.fetch_one(
         f"""UPDATE writing_tasks SET {', '.join(sets)}
@@ -1154,6 +1183,76 @@ async def save_writing_content(task_id: str, content: str) -> int:
             values={"tid": task_id},
         )
     return new_version
+
+
+async def get_writing_sections(task_id: str) -> list[dict]:
+    rows = await database.fetch_all(
+        """SELECT id, task_id, section_index, heading, sub_outline, content,
+                  word_count_target, status, last_generated_at, created_at, updated_at
+           FROM writing_sections WHERE task_id = :tid ORDER BY section_index""",
+        values={"tid": task_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_writing_section(section_id: str, task_id: str) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, task_id, section_index, heading, sub_outline, content,
+                  word_count_target, status, last_generated_at, created_at, updated_at
+           FROM writing_sections WHERE id = :sid AND task_id = :tid""",
+        values={"sid": section_id, "tid": task_id},
+    )
+    return dict(row) if row else None
+
+
+async def upsert_writing_sections(task_id: str, sections: list[dict]) -> None:
+    """Replace all sections for a task with a new ordered list (from TOC sync)."""
+    await database.execute(
+        "DELETE FROM writing_sections WHERE task_id = :tid",
+        values={"tid": task_id},
+    )
+    for idx, sec in enumerate(sections):
+        await database.execute(
+            """INSERT INTO writing_sections
+               (task_id, section_index, heading, sub_outline, word_count_target, status)
+               VALUES (:tid, :idx, :heading, :sub_outline, :wc, 'pending')""",
+            values={
+                "tid": task_id,
+                "idx": idx,
+                "heading": sec.get("heading", ""),
+                "sub_outline": sec.get("sub_outline", ""),
+                "wc": sec.get("word_count_target", 0),
+            },
+        )
+
+
+async def update_writing_section(section_id: str, task_id: str, **kwargs) -> bool:
+    allowed = {"heading", "sub_outline", "content", "word_count_target", "status"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return False
+    sets = []
+    values = {"sid": section_id, "tid": task_id}
+    for key, value in fields.items():
+        sets.append(f"{key} = :{key}")
+        values[key] = value
+    if "content" in fields:
+        sets.append("last_generated_at = NOW()")
+    sets.append("updated_at = NOW()")
+    row = await database.fetch_one(
+        f"""UPDATE writing_sections SET {', '.join(sets)}
+            WHERE id = :sid AND task_id = :tid RETURNING id""",
+        values=values,
+    )
+    return row is not None
+
+
+async def delete_writing_section(section_id: str, task_id: str) -> bool:
+    row = await database.fetch_one(
+        "DELETE FROM writing_sections WHERE id = :sid AND task_id = :tid RETURNING id",
+        values={"sid": section_id, "tid": task_id},
+    )
+    return row is not None
 
 
 async def get_user_processed_files(user_id: int) -> list[str]:

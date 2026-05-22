@@ -25,6 +25,11 @@ from backend.db import (
     get_writing_content,
     save_writing_content,
     get_user_processed_files,
+    get_writing_sections,
+    get_writing_section,
+    upsert_writing_sections,
+    update_writing_section,
+    delete_writing_section,
 )
 from backend.rag import get_embedding, query_rag
 
@@ -143,6 +148,28 @@ def _parse_outline_sections(outline: str) -> list[tuple[str, str]]:
     if current_heading is not None:
         sections.append((current_heading, "\n".join(current_lines).strip()))
     return sections
+
+
+def _parse_toc(toc: str) -> list[str]:
+    """Extract plain heading text from a TOC string.
+
+    Supports '## Heading', '1. Heading', '- Heading' formats.
+    Returns a list of plain heading strings (no prefix).
+    """
+    headings = []
+    for line in toc.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            headings.append(line[3:].strip())
+        elif re.match(r'^\d+[.、)]\s+', line):
+            headings.append(re.sub(r'^\d+[.、)]\s+', '', line).strip())
+        elif re.match(r'^[-*]\s+', line):
+            headings.append(re.sub(r'^[-*]\s+', '', line).strip())
+    return [h for h in headings if h]
+
+
 _templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 
 
@@ -187,11 +214,20 @@ class UpdateWritingTaskRequest(BaseModel):
     style_req: Optional[str] = None
     content_req: Optional[str] = None
     outline: Optional[str] = None
+    toc: Optional[str] = None
     reference_files: Optional[list[str]] = None
 
 
 class SaveWritingContentRequest(BaseModel):
     content: str
+
+
+class UpdateSectionRequest(BaseModel):
+    heading: Optional[str] = None
+    sub_outline: Optional[str] = None
+    content: Optional[str] = None
+    word_count_target: Optional[int] = None
+    status: Optional[str] = None
 
 
 def _serialize_value(value):
@@ -241,7 +277,19 @@ async def get_task(task_id: str, user: dict = Depends(require_write_access)):
 async def patch_task(task_id: str, payload: UpdateWritingTaskRequest, user: dict = Depends(require_write_access)):
     await _ensure_task_owner(task_id, user["id"])
     data = payload.dict(exclude_none=True)
-    await update_writing_task(task_id, user["id"], **data)
+    if data:
+        await update_writing_task(task_id, user["id"], **data)
+    # Sync sections when TOC is saved
+    if payload.toc is not None:
+        task = await get_writing_task(task_id, user["id"])
+        headings = _parse_toc(payload.toc)
+        if headings:
+            wc = (task["word_count"] if task else 0) or 0
+            per_sec = wc // len(headings) if wc > 0 else 0
+            await upsert_writing_sections(task_id, [
+                {"heading": h, "sub_outline": "", "word_count_target": per_sec}
+                for h in headings
+            ])
     return {"success": True}
 
 
@@ -569,6 +617,273 @@ async def format_content(task_id: str, user: dict = Depends(require_write_access
         raise HTTPException(status_code=500, detail=f"排版失败：{e}")
     version = await save_writing_content(task_id, formatted)
     return {"content": formatted, "version": version}
+
+
+@writing_router.post("/tasks/{task_id}/generate_toc")
+async def generate_toc(task_id: str, user: dict = Depends(require_write_access)):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+
+    outline = task.get("outline") or ""
+    if outline:
+        prompt = (
+            f"请根据以下详细内容大纲，提炼出一个简洁的写作目录（TOC）。\n"
+            f"要求：仅列出主要章节标题（每行以 ## 开头），5-10 个，每行一个，不加编号，不加说明。\n\n"
+            f"内容大纲：\n{outline}"
+        )
+    else:
+        prompt = (
+            f"请为以下写作任务生成写作目录（TOC），列出主要章节标题（每行以 ## 开头），5-10 个，每行一个。\n"
+            f"文章标题：{task['title']}\n字数要求：{task['word_count']}字\n"
+            f"内容要求：{task['content_req']}\n仅输出章节标题列表，不加任何额外说明。"
+        )
+
+    async def gen_toc():
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=settings.generation_model, contents=prompt
+            )
+            async for chunk in stream:
+                if chunk.text:
+                    yield f"data: {chunk.text}\n\n"
+        except Exception as e:
+            logger.exception("TOC 生成失败: %s", e)
+            yield f"data: 生成失败：{e}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        gen_toc(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@writing_router.post("/tasks/{task_id}/generate_outline_from_toc")
+async def generate_outline_from_toc(task_id: str, user: dict = Depends(require_write_access)):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+    if not (task.get("toc") or "").strip():
+        raise HTTPException(status_code=400, detail="请先保存写作目录（TOC）")
+
+    prompt = (
+        f"请根据以下写作目录，为每个章节生成详细的内容大纲（使用 ## 和 ### Markdown 层级）：\n"
+        f"文章标题：{task['title']}\n字数要求：{task['word_count']}字（0 表示不限）\n"
+        f"风格要求：{task['style_req']}\n内容要求：{task['content_req']}\n\n"
+        f"写作目录：\n{task['toc']}\n\n仅输出完整的 Markdown 大纲，不加任何额外说明。"
+    )
+
+    async def gen_outline():
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=settings.generation_model, contents=prompt
+            )
+            async for chunk in stream:
+                if chunk.text:
+                    yield f"data: {chunk.text}\n\n"
+        except Exception as e:
+            logger.exception("从 TOC 生成大纲失败: %s", e)
+            yield f"data: 生成失败：{e}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        gen_outline(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@writing_router.get("/tasks/{task_id}/sections")
+async def list_sections(task_id: str, user: dict = Depends(require_write_access)):
+    await _ensure_task_owner(task_id, user["id"])
+    sections = await get_writing_sections(task_id)
+    return [_serialize_row(s) for s in sections]
+
+
+@writing_router.patch("/tasks/{task_id}/sections/{section_id}")
+async def patch_section(
+    task_id: str,
+    section_id: str,
+    payload: UpdateSectionRequest,
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    data = payload.dict(exclude_none=True)
+    if not data:
+        return {"success": True}
+    if not await update_writing_section(section_id, task_id, **data):
+        raise HTTPException(status_code=404, detail="段落不存在")
+    return {"success": True}
+
+
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/generate")
+async def generate_section_content(
+    task_id: str,
+    section_id: str,
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+    section = await get_writing_section(section_id, task_id)
+    if not section:
+        raise HTTPException(status_code=404, detail="段落不存在")
+
+    reference_files = task.get("reference_files") or []
+    rag_text = ""
+    if reference_files:
+        q = f"{task['title']} {section['heading']} {task['content_req']}"
+        embedding = await get_embedding(embed_client, q)
+        rag_results = await query_rag(
+            embedding,
+            session_id=str(task["session_id"]),
+            source_files=reference_files,
+        )
+        rag_text = "\n".join(r["content"] for r in rag_results)
+
+    # Previous section's tail for continuity
+    all_secs = await get_writing_sections(task_id)
+    idx = section["section_index"]
+    prev_tail = ""
+    for s in all_secs:
+        if s["section_index"] < idx and s.get("content"):
+            prev_tail = s["content"][-800:]
+
+    wc_target = section.get("word_count_target") or 0
+    if wc_target == 0:
+        wc = (task.get("word_count") or 0)
+        wc_target = (wc // len(all_secs)) if (wc > 0 and all_secs) else 2000
+
+    heading = section["heading"]
+    sub_outline = section.get("sub_outline") or ""
+    sec_outline = (f"## {heading}\n{sub_outline}").strip() if sub_outline else f"## {heading}"
+    context_hint = f"\n前一段落结尾（仅供衔接参考，勿重复）：\n...{prev_tail}" if prev_tail else ""
+
+    prompt = (
+        f"请为以下写作任务创作指定章节内容（Markdown，直接输出含 ## 章节标题的完整章节）：\n"
+        f"文章标题：{task['title']}\n风格：{task['style_req']}\n内容要求：{task['content_req']}\n"
+        f"完整大纲：\n{task.get('outline', '')}\n参考资料：\n{rag_text}\n"
+        f"本章节大纲：\n{sec_outline}\n本章节字数：约{wc_target}字"
+        f"{context_hint}\n直接输出本章节完整内容，不加任何额外说明。"
+    )
+    gen_config = gtypes.GenerateContentConfig(max_output_tokens=65536)
+    accumulated: list[str] = []
+
+    async def gen_section():
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=settings.generation_model, contents=prompt, config=gen_config,
+            )
+            async for chunk in stream:
+                if chunk.text:
+                    accumulated.append(chunk.text)
+                    yield f"data: {chunk.text}\n\n"
+        except Exception as e:
+            logger.exception("章节内容生成失败: %s", e)
+            yield f"data: 生成失败：{e}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        full_content = "".join(accumulated)
+        if full_content:
+            await update_writing_section(section_id, task_id, content=full_content, status="draft")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        gen_section(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/format")
+async def format_section_content(
+    task_id: str,
+    section_id: str,
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    section = await get_writing_section(section_id, task_id)
+    if not section or not section.get("content"):
+        raise HTTPException(status_code=404, detail="段落内容不存在")
+    try:
+        formatted = await asyncio.to_thread(_format_markdown_sync, section["content"])
+    except Exception as e:
+        logger.exception("段落排版失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"排版失败：{e}")
+    await update_writing_section(section_id, task_id, content=formatted)
+    return {"content": formatted}
+
+
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/chat")
+async def section_chat(
+    task_id: str,
+    section_id: str,
+    message: str = Form(...),
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+    section = await get_writing_section(section_id, task_id)
+    if not section:
+        raise HTTPException(status_code=404, detail="段落不存在")
+
+    reference_files = task.get("reference_files") or []
+    rag_text = ""
+    if reference_files:
+        embedding = await get_embedding(embed_client, f"{message} {section['heading']}")
+        rag_results = await query_rag(
+            embedding,
+            session_id=str(task["session_id"]),
+            source_files=reference_files,
+        )
+        rag_text = "\n".join(r["content"] for r in rag_results)
+
+    system_instruction = (
+        "你是一个专业的写作助手，协助用户创作和改进指定章节。\n"
+        "若用户要求修改章节内容，在回复末尾用以下标记输出完整修改后的章节（Markdown，含 ## 标题）：\n"
+        "[SECTION_UPDATE_START]\n（完整修改后章节内容）\n[SECTION_UPDATE_END]\n"
+        "标记后另起一行用 1-2 句话说明改动要点。\n"
+        "若用户只是提问或讨论，正常回复即可，无需输出标记。"
+    )
+
+    content_block = (
+        f"\n\n## 当前章节内容\n\n{section.get('content', '')}"
+        if section.get("content") else "\n\n## 当前章节内容\n\n（尚未生成内容）"
+    )
+    rag_block = f"\n\n## 参考资料片段\n\n{rag_text}" if rag_text else ""
+
+    prompt = (
+        f"## 写作任务\n标题：{task['title']}\n风格：{task['style_req']}\n内容要求：{task['content_req']}\n"
+        f"## 当前章节：{section['heading']}\n章节大纲：{section.get('sub_outline', '')}"
+        f"{content_block}{rag_block}\n\n## 用户指令\n\n{message}"
+    )
+
+    config = gtypes.GenerateContentConfig(system_instruction=system_instruction, max_output_tokens=65536)
+    try:
+        resp = await client.aio.models.generate_content(
+            model=settings.generation_model, contents=prompt, config=config,
+        )
+        answer = resp.text
+    except Exception as e:
+        logger.exception("章节对话生成失败: %s", e)
+        raise HTTPException(status_code=502, detail="AI 服务暂时不可用")
+
+    return {"answer": answer}
+
+
+@writing_router.get("/tasks/{task_id}/full_content")
+async def get_full_content(task_id: str, user: dict = Depends(require_write_access)):
+    """Assemble draft/confirmed section contents into a single document."""
+    await _ensure_task_owner(task_id, user["id"])
+    sections = await get_writing_sections(task_id)
+    parts = [s["content"] for s in sections if s.get("content") and s.get("status") in ("draft", "confirmed")]
+    return {"content": "\n\n".join(parts), "section_count": len(parts)}
 
 
 @writing_router.get("/{task_id}", response_class=HTMLResponse)
