@@ -98,6 +98,30 @@ MIGRATIONS = [
     """),
     ("writing_sections.idx_task_id",
      "CREATE INDEX IF NOT EXISTS idx_writing_sections_task_id ON writing_sections(task_id, section_index)"),
+
+    # writing_tasks 表：风格技能蒸馏
+    ("writing_tasks.style_skills",
+     "ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_skills TEXT DEFAULT ''"),
+    ("writing_tasks.style_skills_updated_at",
+     "ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_skills_updated_at TIMESTAMPTZ"),
+    ("writing_tasks.style_source_text",
+     "ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_source_text TEXT DEFAULT ''"),
+
+    # writing_evaluations 表：质量评估结果
+    ("writing_evaluations.table", """
+        CREATE TABLE IF NOT EXISTS writing_evaluations (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id             UUID NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+            readability_score   INTEGER DEFAULT 0,
+            readability_report  TEXT DEFAULT '',
+            style_score         INTEGER DEFAULT 0,
+            style_report        TEXT DEFAULT '',
+            overall_score       INTEGER DEFAULT 0,
+            created_at          TIMESTAMPTZ DEFAULT NOW()
+        )
+    """),
+    ("writing_evaluations.idx_task_id",
+     "CREATE INDEX IF NOT EXISTS idx_writing_evaluations_task_id ON writing_evaluations(task_id, created_at DESC)"),
 ]
 
 

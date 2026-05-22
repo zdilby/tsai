@@ -319,6 +319,88 @@
             min-height: 267px;
             overflow: hidden;
         }
+        /* Right panel tabs */
+        .right-panel-tabs {
+            display: flex;
+            border-top: 2px solid #e0e0e0;
+            border-bottom: 1px solid #e0e0e0;
+            flex-shrink: 0;
+        }
+        .right-tab-btn {
+            flex: 1;
+            padding: 7px 0;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #9e9e9e;
+            background: none;
+            border: none;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: color 0.15s, border-color 0.15s;
+        }
+        .right-tab-btn.active { color: #5c6bc0; border-bottom-color: #5c6bc0; }
+        .right-tab-pane { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+        .right-tab-pane.active { display: flex; }
+        /* Evaluation panel */
+        #eval-panel {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 12px;
+            font-size: 12px;
+        }
+        .eval-run-bar {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        .eval-pipeline-status { color: #9e9e9e; font-size: 11px; margin-top: 4px; }
+        .eval-score-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .eval-score-card {
+            flex: 1;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: center;
+        }
+        .eval-score-card .score-val {
+            font-size: 24px;
+            font-weight: 700;
+            line-height: 1.1;
+        }
+        .eval-score-card .score-label { font-size: 10px; color: #9e9e9e; margin-top: 2px; }
+        .score-good  { color: #388e3c; }
+        .score-mid   { color: #f57c00; }
+        .score-low   { color: #c62828; }
+        .eval-report-section { margin-bottom: 10px; }
+        .eval-report-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: #5c6bc0;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+        .eval-report-body {
+            font-size: 11px;
+            line-height: 1.6;
+            color: #555;
+            white-space: pre-wrap;
+            background: #fafafa;
+            border: 1px solid #f0f0f0;
+            border-radius: 4px;
+            padding: 7px 10px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .eval-skills-section { margin-top: 8px; }
         .ai-chat-header {
             font-size: 12px;
             font-weight: 600;
@@ -607,11 +689,29 @@
             </div>
 
             <div id="ai-chat-panel">
-                <div class="ai-chat-header">AI 对话</div>
-                <div id="chat-messages"></div>
-                <div id="chat-input-area">
-                    <input type="text" id="chat-input" class="browser-default" placeholder="输入消息，Enter 发送">
-                    <button id="btn-chat-send" class="btn indigo btn-small waves-effect waves-light">发送</button>
+                <div class="right-panel-tabs">
+                    <button class="right-tab-btn active" id="tab-btn-chat" onclick="switchRightTab('chat')">AI 对话</button>
+                    <button class="right-tab-btn" id="tab-btn-eval" onclick="switchRightTab('eval')">评估</button>
+                </div>
+                <!-- Chat pane -->
+                <div class="right-tab-pane active" id="tab-pane-chat">
+                    <div id="chat-messages"></div>
+                    <div id="chat-input-area">
+                        <input type="text" id="chat-input" class="browser-default" placeholder="输入消息，Enter 发送">
+                        <button id="btn-chat-send" class="btn indigo btn-small waves-effect waves-light">发送</button>
+                    </div>
+                </div>
+                <!-- Eval pane -->
+                <div class="right-tab-pane" id="tab-pane-eval">
+                    <div id="eval-panel">
+                        <div class="eval-run-bar">
+                            <button id="btn-run-eval" class="btn indigo waves-effect waves-light btn-small" onclick="runEvaluation()">运行质量评估</button>
+                            <button id="btn-distill-style" class="btn indigo lighten-2 waves-effect waves-light btn-small" onclick="distillStyle()" title="将风格要求蒸馏为写作Agent可用的风格技能手册">蒸馏风格</button>
+                        </div>
+                        <div id="eval-pipeline-status" class="eval-pipeline-status"></div>
+                        <div id="eval-results"></div>
+                        <div id="eval-skills-display" class="eval-skills-section"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -664,7 +764,7 @@
         </div>
     </div>
     <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;padding:8px 24px">
-        <button id="btn-gen-style" class="btn indigo waves-effect waves-light" type="button">生成风格</button>
+        <button id="btn-gen-style" class="btn indigo waves-effect waves-light" type="button">生成风格描述</button>
         <div>
             <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
             <a href="#!" id="btn-save-style" class="waves-effect waves-green btn-flat">确定</a>
@@ -843,6 +943,7 @@
 
             await loadSections(taskId);
             await loadChatHistory(task.session_id);
+            await loadLatestEvaluation();
         } catch (e) {
             console.error('加载任务失败', e);
         }
@@ -913,6 +1014,8 @@
                 if (!r.ok) throw new Error(await r.text());
                 exitEditMode(content);
                 M.toast({html:'已保存', classes:'indigo'});
+                // Auto-trigger quality evaluation after manual save
+                runEvaluation();
             } catch(e) {
                 M.toast({html:'保存失败：' + e.message, classes:'red'});
             } finally {
@@ -965,6 +1068,8 @@
             currentContent = d.content;
             exitEditMode(d.content);
             M.toast({html: '排版优化完成', classes: 'indigo'});
+            // Auto-trigger quality evaluation after formatting
+            runEvaluation();
         } catch (e) {
             preview.innerHTML = prevHTML;
             M.toast({html: '排版失败：' + e.message, classes: 'orange'});
@@ -1177,6 +1282,165 @@
         }
     }
 
+    // ---- Right panel tabs ----
+
+    function switchRightTab(tab) {
+        ['chat', 'eval'].forEach(t => {
+            document.getElementById('tab-btn-' + t).classList.toggle('active', t === tab);
+            document.getElementById('tab-pane-' + t).classList.toggle('active', t === tab);
+        });
+    }
+
+    // ---- Style Distillation ----
+
+    async function distillStyle() {
+        if (!TASK_ID) { M.toast({html: '请先选择写作任务'}); return; }
+        const btn = document.getElementById('btn-distill-style');
+        const statusEl = document.getElementById('eval-pipeline-status');
+        const resultsEl = document.getElementById('eval-results');
+        const skillsEl = document.getElementById('eval-skills-display');
+        btn.disabled = true;
+        btn.textContent = '蒸馏中...';
+        statusEl.textContent = '⏳ 正在分析参考风格，提炼技能手册...';
+        skillsEl.innerHTML = '';
+        resultsEl.innerHTML = '';
+        switchRightTab('eval');
+        let accumulated = '';
+        try {
+            await sseStream(`/writing/tasks/${TASK_ID}/distill_style`, 'POST', chunk => {
+                accumulated += chunk;
+                skillsEl.innerHTML = `
+                    <div class="eval-report-title">风格技能手册（生成中）</div>
+                    <div class="eval-report-body">${escHtml(accumulated)}</div>`;
+            });
+            statusEl.textContent = '✅ 风格技能手册已生成，写作 Agent 将自动调用';
+            skillsEl.innerHTML = `
+                <div class="eval-report-title">风格技能手册</div>
+                <div class="eval-report-body">${escHtml(accumulated)}</div>`;
+            M.toast({html: '风格技能手册已保存', classes: 'indigo'});
+        } catch (e) {
+            statusEl.textContent = '❌ 蒸馏失败：' + e.message;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '蒸馏风格';
+        }
+    }
+
+    // ---- Quality Evaluation Pipeline ----
+
+    function scoreClass(s) {
+        return s >= 80 ? 'score-good' : s >= 60 ? 'score-mid' : 'score-low';
+    }
+
+    async function runEvaluation() {
+        if (!TASK_ID) { M.toast({html: '请先选择写作任务'}); return; }
+        const btn = document.getElementById('btn-run-eval');
+        const statusEl = document.getElementById('eval-pipeline-status');
+        const resultsEl = document.getElementById('eval-results');
+        btn.disabled = true;
+        btn.textContent = '评估中...';
+        statusEl.textContent = '';
+        resultsEl.innerHTML = '';
+        switchRightTab('eval');
+
+        let readability = null, style = null;
+
+        try {
+            const resp = await fetch(`/writing/tasks/${TASK_ID}/evaluate`, {method: 'POST'});
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({detail: '请求失败'}));
+                throw new Error(err.detail || '请求失败');
+            }
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '', finished = false;
+            while (!finished) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const raw = line.slice(6).trim();
+                    if (raw === '[DONE]') { finished = true; break; }
+                    let evt;
+                    try { evt = JSON.parse(raw); } catch { continue; }
+                    if (evt.type === 'stage') {
+                        if (evt.status === 'running') {
+                            const label = evt.stage === 'readability' ? '阅读检查' : '风格比对';
+                            statusEl.textContent = `⏳ ${label} 进行中...`;
+                        } else if (evt.status === 'done') {
+                            if (evt.stage === 'readability') readability = evt;
+                            else if (evt.stage === 'style') style = evt;
+                            renderEvalResults(resultsEl, readability, style, null);
+                        }
+                    } else if (evt.type === 'complete') {
+                        renderEvalResults(resultsEl, readability, style, evt.overall_score);
+                        statusEl.textContent = '✅ 评估完成';
+                    }
+                }
+            }
+        } catch (e) {
+            statusEl.textContent = '❌ 评估失败：' + e.message;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '运行质量评估';
+        }
+    }
+
+    function renderEvalResults(container, readability, style, overall) {
+        let html = '';
+        if (overall !== null && overall !== undefined) {
+            html += `<div class="eval-score-row">
+                <div class="eval-score-card">
+                    <div class="score-val ${scoreClass(overall)}">${overall}</div>
+                    <div class="score-label">综合评分</div>
+                </div>
+                ${readability ? `<div class="eval-score-card">
+                    <div class="score-val ${scoreClass(readability.score)}">${readability.score}</div>
+                    <div class="score-label">阅读检查</div>
+                </div>` : ''}
+                ${style ? `<div class="eval-score-card">
+                    <div class="score-val ${scoreClass(style.score)}">${style.score}</div>
+                    <div class="score-label">风格比对</div>
+                </div>` : ''}
+            </div>`;
+        }
+        if (readability) {
+            html += `<div class="eval-report-section">
+                <div class="eval-report-title">阅读检查报告</div>
+                <div class="eval-report-body">${escHtml(readability.report)}</div>
+            </div>`;
+        }
+        if (style) {
+            html += `<div class="eval-report-section">
+                <div class="eval-report-title">风格比对报告</div>
+                <div class="eval-report-body">${escHtml(style.report)}</div>
+            </div>`;
+        }
+        container.innerHTML = html;
+    }
+
+    async function loadLatestEvaluation() {
+        if (!TASK_ID) return;
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/evaluations/latest`);
+            if (!r.ok) return;
+            const d = await r.json();
+            if (!d.found) return;
+            const resultsEl = document.getElementById('eval-results');
+            renderEvalResults(
+                resultsEl,
+                d.readability_score ? {score: d.readability_score, report: d.readability_report} : null,
+                d.style_score ? {score: d.style_score, report: d.style_report} : null,
+                d.overall_score
+            );
+            document.getElementById('eval-pipeline-status').textContent =
+                `上次评估：${new Date(d.created_at).toLocaleString('zh-CN')}`;
+        } catch (e) { /* silent */ }
+    }
+
     // ---- SSE helper ----
     async function sseStream(url, method, onChunk) {
         const resp = await fetch(url, {method: method || 'GET'});
@@ -1298,6 +1562,7 @@
                 const formData = new FormData();
                 if (url) formData.append('url', url);
                 if (file) formData.append('file', file);
+                if (TASK_ID) formData.append('task_id', TASK_ID);
                 const resp = await fetch('/writing/generate_style', {method: 'POST', body: formData});
                 if (!resp.ok) {
                     const err = await resp.json().catch(() => ({detail: '请求失败'}));

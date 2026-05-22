@@ -30,6 +30,9 @@ from backend.db import (
     upsert_writing_sections,
     update_writing_section,
     delete_writing_section,
+    update_style_skills,
+    save_writing_evaluation,
+    get_latest_evaluation,
 )
 from backend.rag import get_embedding, query_rag
 
@@ -326,6 +329,7 @@ async def list_files(user: dict = Depends(require_write_access)):
 async def generate_style(
     url: str = Form(None),
     file: UploadFile = File(None),
+    task_id: str = Form(None),
     user: dict = Depends(require_write_access),
 ):
     if not url and (not file or not file.filename):
@@ -355,6 +359,10 @@ async def generate_style(
     text = text[:6000]
     if not text.strip():
         raise HTTPException(status_code=400, detail="未能提取到有效文本内容")
+
+    # Save source text for later style distillation / comparison
+    if task_id and await writing_task_owned_by(task_id, user["id"]):
+        await update_writing_task(task_id, user["id"], style_source_text=text)
 
     prompt = (
         "请分析以下文本的写作风格，输出 2-4 句话的风格描述，"
@@ -445,6 +453,12 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
     style_req = task["style_req"]
     content_req = task["content_req"]
     outline = task["outline"]
+    style_skills = (task.get("style_skills") or "").strip()
+    style_block = (
+        f"\n【风格技能手册（优先遵照）】\n{style_skills}\n"
+        if style_skills else
+        f"\n风格：{style_req}\n" if style_req else ""
+    )
 
     sections = _parse_outline_sections(outline) if outline else []
     use_sectional = len(sections) >= 2 and (word_count == 0 or word_count >= 3000)
@@ -463,7 +477,7 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
                 if not current_content:
                     sec_prompt = (
                         f"请为以下写作任务创作指定章节内容（Markdown，直接输出含章节标题的完整章节）：\n"
-                        f"文章标题：{title}\n风格：{style_req}\n内容要求：{content_req}\n"
+                        f"文章标题：{title}{style_block}内容要求：{content_req}\n"
                         f"完整大纲：\n{outline}\n参考资料：\n{rag_text}\n"
                         f"本章节大纲：\n{sec_outline}\n"
                         f"本章节字数：约{per_section_words}字（第{i+1}/{len(sections)}章）"
@@ -472,7 +486,7 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
                 else:
                     sec_prompt = (
                         f"请优化以下写作任务指定章节（Markdown，输出含章节标题的完整章节）：\n"
-                        f"文章标题：{title}\n风格：{style_req}\n内容要求：{content_req}\n"
+                        f"文章标题：{title}{style_block}内容要求：{content_req}\n"
                         f"完整大纲：\n{outline}\n参考资料：\n{rag_text}\n"
                         f"本章节大纲：\n{sec_outline}\n"
                         f"本章节字数：约{per_section_words}字（第{i+1}/{len(sections)}章）"
@@ -496,14 +510,14 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
             if not current_content:
                 prompt = (
                     f"请根据以下设置创作一篇完整的文章（Markdown 格式）{word_hint}：\n"
-                    f"标题：{title}\n字数：{word_count}字\n风格：{style_req}\n"
+                    f"标题：{title}\n字数：{word_count}字{style_block}"
                     f"内容要求：{content_req}\n内容大纲：\n{outline}\n参考资料：\n{rag_text}\n"
                     f"直接输出文章内容，不要任何额外说明。"
                 )
             else:
                 prompt = (
                     f"请根据以下设置优化现有文章内容（Markdown 格式，重新输出完整内容）{word_hint}：\n"
-                    f"标题：{title}\n字数：{word_count}字\n风格：{style_req}\n"
+                    f"标题：{title}\n字数：{word_count}字{style_block}"
                     f"内容要求：{content_req}\n内容大纲：\n{outline}\n参考资料：\n{rag_text}\n"
                     f"当前内容（仅供参考，优化时可改动）：\n{current_content[:3000]}\n"
                     f"直接输出完整优化后的文章，不要任何额外说明。"
@@ -763,9 +777,15 @@ async def generate_section_content(
     sec_outline = (f"## {heading}\n{sub_outline}").strip() if sub_outline else f"## {heading}"
     context_hint = f"\n前一段落结尾（仅供衔接参考，勿重复）：\n...{prev_tail}" if prev_tail else ""
 
+    _skills = (task.get("style_skills") or "").strip()
+    _style_block = (
+        f"\n【风格技能手册（优先遵照）】\n{_skills}\n"
+        if _skills else
+        f"\n风格：{task['style_req']}\n" if task.get("style_req") else ""
+    )
     prompt = (
         f"请为以下写作任务创作指定章节内容（Markdown，直接输出含 ## 章节标题的完整章节）：\n"
-        f"文章标题：{task['title']}\n风格：{task['style_req']}\n内容要求：{task['content_req']}\n"
+        f"文章标题：{task['title']}{_style_block}内容要求：{task['content_req']}\n"
         f"完整大纲：\n{task.get('outline', '')}\n参考资料：\n{rag_text}\n"
         f"本章节大纲：\n{sec_outline}\n本章节字数：约{wc_target}字"
         f"{context_hint}\n直接输出本章节完整内容，不加任何额外说明。"
@@ -875,6 +895,229 @@ async def section_chat(
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用")
 
     return {"answer": answer}
+
+
+_DISTILL_SYSTEM = """你是专业文体风格分析师。基于提供的材料，提炼出写作Agent可直接调用的「风格技能手册」。
+输出 Markdown，结构严格如下（每节 2-3 条，每条一句话，具体可操作）：
+
+## 语气与腔调
+- ...
+
+## 句式结构
+- ...
+
+## 词汇风格
+- ...
+
+## 叙事节奏
+- ...
+
+## 过渡与衔接
+- ...
+
+## 结构模式
+- ...
+
+仅输出手册内容，不加任何说明或前言。"""
+
+_READABILITY_PROMPT_TMPL = """你是专业中文文章阅读体验评审师。请评审以下文章：
+
+{content}
+
+评估五个维度：逻辑连贯性、段落长度（建议150-300字/段）、重复表达、标题内容一致性、整体流畅度。
+
+输出格式（严格遵守，不可增删字段）：
+评分：[0-100整数]
+问题：
+- [具体问题，标注段落位置]
+- [...]
+总结：[1-2句整体评价]"""
+
+_STYLE_COMPARE_PROMPT_TMPL = """你是风格对照专家。将【待评估文章】与【风格参考资料】进行深度对照分析。
+
+{style_ref}
+
+【待评估文章节选】
+{content}
+
+评估四个维度（每项0-100分）：语气腔调匹配度、句式结构相似度、词汇风格一致性、叙事节奏吻合度。
+
+输出格式（严格遵守）：
+总分：[四维平均，0-100整数]
+语气腔调：[分数] - [一句具体分析]
+句式结构：[分数] - [一句具体分析]
+词汇风格：[分数] - [一句具体分析]
+叙事节奏：[分数] - [一句具体分析]
+重点改进：
+- [最重要改进建议，附原文改法示例]
+- [改进建议2]
+- [改进建议3]"""
+
+
+@writing_router.post("/tasks/{task_id}/distill_style")
+async def distill_style(task_id: str, user: dict = Depends(require_write_access)):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+
+    style_req = (task.get("style_req") or "").strip()
+    source_text = (task.get("style_source_text") or "").strip()
+    if not style_req and not source_text:
+        raise HTTPException(status_code=400, detail="请先设置风格要求或通过 URL/文件生成风格描述")
+
+    parts = []
+    if style_req:
+        parts.append(f"【风格描述】\n{style_req}")
+    if source_text:
+        parts.append(f"【参考原文节选】\n{source_text[:4000]}")
+    user_content = "\n\n".join(parts)
+
+    config = gtypes.GenerateContentConfig(
+        system_instruction=_DISTILL_SYSTEM,
+        max_output_tokens=4096,
+    )
+    accumulated: list[str] = []
+
+    async def gen_distill():
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=settings.generation_model, contents=user_content, config=config,
+            )
+            async for chunk in stream:
+                if chunk.text:
+                    accumulated.append(chunk.text)
+                    yield f"data: {chunk.text}\n\n"
+        except Exception as e:
+            logger.exception("风格蒸馏失败: %s", e)
+            yield f"data: 蒸馏失败：{e}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        full_skills = "".join(accumulated)
+        if full_skills:
+            await update_style_skills(task_id, full_skills)
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        gen_distill(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@writing_router.post("/tasks/{task_id}/evaluate")
+async def evaluate_content(task_id: str, user: dict = Depends(require_write_access)):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+
+    content_data = await get_writing_content(task_id)
+    content = (content_data.get("content") or "") if content_data else ""
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="暂无内容可评估")
+
+    style_skills = (task.get("style_skills") or "").strip()
+    style_req = (task.get("style_req") or "").strip()
+    style_source = (task.get("style_source_text") or "").strip()
+    reference_files = task.get("reference_files") or []
+
+    rag_text = ""
+    if reference_files and (style_skills or style_req or style_source):
+        try:
+            embedding = await get_embedding(embed_client, "写作风格 语气 句式 词汇 叙述")
+            rag_results = await query_rag(
+                embedding,
+                session_id=str(task["session_id"]),
+                source_files=reference_files,
+            )
+            rag_text = "\n".join(r["content"] for r in rag_results)
+        except Exception:
+            pass
+
+    async def gen_eval():
+        import json as _json
+
+        # --- Stage 1: Readability ---
+        yield f"data: {_json.dumps({'type':'stage','stage':'readability','status':'running'}, ensure_ascii=False)}\n\n"
+        readability_score, readability_report = 0, ""
+        try:
+            prompt = _READABILITY_PROMPT_TMPL.format(content=content[:8000])
+            resp = await client.aio.models.generate_content(
+                model=settings.generation_model,
+                contents=prompt,
+                config=gtypes.GenerateContentConfig(max_output_tokens=2048),
+            )
+            readability_report = resp.text or ""
+            m = re.search(r'评分[：:]\s*(\d+)', readability_report)
+            readability_score = max(0, min(100, int(m.group(1)))) if m else 70
+        except Exception as e:
+            readability_report = f"评估失败：{e}"
+            readability_score = 0
+        yield f"data: {_json.dumps({'type':'stage','stage':'readability','status':'done','score':readability_score,'report':readability_report}, ensure_ascii=False)}\n\n"
+
+        # --- Stage 2: Style Comparison ---
+        style_score, style_report = None, ""
+        has_style_ref = bool(style_skills or style_req or style_source)
+        if has_style_ref:
+            yield f"data: {_json.dumps({'type':'stage','stage':'style','status':'running'}, ensure_ascii=False)}\n\n"
+            ref_parts = []
+            if style_skills:
+                ref_parts.append(f"【风格技能手册】\n{style_skills}")
+            elif style_req:
+                ref_parts.append(f"【风格要求描述】\n{style_req}")
+            if style_source:
+                ref_parts.append(f"【参考原文节选】\n{style_source[:2000]}")
+            if rag_text:
+                ref_parts.append(f"【参考资料片段】\n{rag_text[:1500]}")
+            try:
+                prompt = _STYLE_COMPARE_PROMPT_TMPL.format(
+                    style_ref="\n\n".join(ref_parts),
+                    content=content[:6000],
+                )
+                resp = await client.aio.models.generate_content(
+                    model=settings.generation_model,
+                    contents=prompt,
+                    config=gtypes.GenerateContentConfig(max_output_tokens=2048),
+                )
+                style_report = resp.text or ""
+                m = re.search(r'总分[：:]\s*(\d+)', style_report)
+                style_score = max(0, min(100, int(m.group(1)))) if m else 70
+            except Exception as e:
+                style_report = f"评估失败：{e}"
+                style_score = 0
+            yield f"data: {_json.dumps({'type':'stage','stage':'style','status':'done','score':style_score,'report':style_report}, ensure_ascii=False)}\n\n"
+
+        overall = ((readability_score + (style_score or 0)) // 2) if style_score is not None else readability_score
+        try:
+            await save_writing_evaluation(
+                task_id,
+                readability_score=readability_score,
+                readability_report=readability_report,
+                style_score=style_score or 0,
+                style_report=style_report,
+                overall_score=overall,
+            )
+        except Exception as e:
+            logger.warning("保存评估结果失败: %s", e)
+
+        yield f"data: {_json.dumps({'type':'complete','overall_score':overall,'has_style':has_style_ref}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        gen_eval(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@writing_router.get("/tasks/{task_id}/evaluations/latest")
+async def get_evaluation_latest(task_id: str, user: dict = Depends(require_write_access)):
+    await _ensure_task_owner(task_id, user["id"])
+    ev = await get_latest_evaluation(task_id)
+    if not ev:
+        return {"found": False}
+    return {"found": True, **_serialize_row(ev)}
 
 
 @writing_router.get("/tasks/{task_id}/full_content")

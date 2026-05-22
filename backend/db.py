@@ -295,6 +295,27 @@ async def init_writing_tables():
         CREATE INDEX IF NOT EXISTS idx_writing_sections_task_id
         ON writing_sections(task_id, section_index)
     """)
+    # --- writing_tasks: style skills + source ---
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_skills TEXT DEFAULT '';")
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_skills_updated_at TIMESTAMPTZ;")
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_source_text TEXT DEFAULT '';")
+    # --- writing_evaluations ---
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS writing_evaluations (
+          id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          task_id             UUID NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+          readability_score   INTEGER DEFAULT 0,
+          readability_report  TEXT DEFAULT '',
+          style_score         INTEGER DEFAULT 0,
+          style_report        TEXT DEFAULT '',
+          overall_score       INTEGER DEFAULT 0,
+          created_at          TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_writing_evaluations_task_id
+        ON writing_evaluations(task_id, created_at DESC)
+    """)
 
 
 async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
@@ -1082,6 +1103,7 @@ async def get_writing_task(task_id: str, user_id: int) -> dict | None:
     row = await database.fetch_one(
         """SELECT id, user_id, session_id, title, word_count, style_req, content_req,
                   outline, outline_updated_at, toc, toc_updated_at,
+                  style_skills, style_skills_updated_at, style_source_text,
                   reference_files, created_at, updated_at
            FROM writing_tasks WHERE id = :tid AND user_id = :uid""",
         values={"tid": task_id, "uid": user_id},
@@ -1106,7 +1128,8 @@ async def writing_task_owned_by(task_id: str, user_id: int) -> bool:
 
 
 async def update_writing_task(task_id: str, user_id: int, **kwargs) -> bool:
-    allowed = {"title", "word_count", "style_req", "content_req", "outline", "toc", "reference_files"}
+    allowed = {"title", "word_count", "style_req", "content_req", "outline", "toc",
+               "reference_files", "style_skills", "style_skills_updated_at", "style_source_text"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return False
@@ -1253,6 +1276,51 @@ async def delete_writing_section(section_id: str, task_id: str) -> bool:
         values={"sid": section_id, "tid": task_id},
     )
     return row is not None
+
+
+async def update_style_skills(task_id: str, skills_text: str, source_text: str | None = None) -> bool:
+    sets = ["style_skills = :skills", "style_skills_updated_at = NOW()", "updated_at = NOW()"]
+    values: dict = {"tid": task_id, "skills": skills_text}
+    if source_text is not None:
+        sets.append("style_source_text = :src")
+        values["src"] = source_text
+    row = await database.fetch_one(
+        f"UPDATE writing_tasks SET {', '.join(sets)} WHERE id = :tid RETURNING id",
+        values=values,
+    )
+    return row is not None
+
+
+async def save_writing_evaluation(
+    task_id: str,
+    readability_score: int,
+    readability_report: str,
+    style_score: int,
+    style_report: str,
+    overall_score: int,
+) -> dict:
+    row = await database.fetch_one(
+        """INSERT INTO writing_evaluations
+           (task_id, readability_score, readability_report, style_score, style_report, overall_score)
+           VALUES (:tid, :rs, :rr, :ss, :sr, :os)
+           RETURNING id, overall_score, created_at""",
+        values={
+            "tid": task_id, "rs": readability_score, "rr": readability_report,
+            "ss": style_score, "sr": style_report, "os": overall_score,
+        },
+    )
+    return dict(row) if row else {}
+
+
+async def get_latest_evaluation(task_id: str) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, task_id, readability_score, readability_report,
+                  style_score, style_report, overall_score, created_at
+           FROM writing_evaluations WHERE task_id = :tid
+           ORDER BY created_at DESC LIMIT 1""",
+        values={"tid": task_id},
+    )
+    return dict(row) if row else None
 
 
 async def get_user_processed_files(user_id: int) -> list[str]:
