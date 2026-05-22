@@ -26,7 +26,6 @@ from backend.db import (
     save_writing_content,
     get_user_processed_files,
 )
-from agent_system.llm import complete_coding, complete as complete_default
 from backend.rag import get_embedding, query_rag
 
 _FORMAT_SYSTEM = (
@@ -67,8 +66,46 @@ def _split_for_format(text: str) -> list[str]:
     return chunks or [text]
 
 
+def _codex_format_sync(chunk: str) -> str:
+    """Call Codex OpenAI-compatible endpoint synchronously. Raises if not configured."""
+    import os
+    api_key = os.getenv("CODEX_API_KEY", "").strip()
+    base_url = os.getenv("CODEX_BASE_URL", "").strip()
+    model = os.getenv("CODEX_MODEL", "gpt-4o").strip()
+    if not api_key or not base_url:
+        raise RuntimeError("CODEX not configured")
+    url = base_url.rstrip("/") + "/chat/completions"
+    with httpx.Client(timeout=60) as hc:
+        resp = hc.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _FORMAT_SYSTEM},
+                    {"role": "user", "content": chunk},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+
+def _gemini_format_sync(chunk: str) -> str:
+    """Format via project Gemini client synchronously."""
+    resp = client.models.generate_content(
+        model=settings.generation_model,
+        contents=chunk,
+        config=gtypes.GenerateContentConfig(
+            system_instruction=_FORMAT_SYSTEM,
+            max_output_tokens=8192,
+        ),
+    )
+    return resp.text
+
+
 def _format_markdown_sync(raw: str) -> str:
-    """Run Codex formatting on each chunk and reassemble. Synchronous."""
+    """Format each chunk: Codex first, fall back to Gemini, preserve on double failure."""
     chunks = _split_for_format(raw)
     results: list[str] = []
     for chunk in chunks:
@@ -76,23 +113,11 @@ def _format_markdown_sync(raw: str) -> str:
             results.append(chunk)
             continue
         try:
-            formatted = complete_coding(
-                system=_FORMAT_SYSTEM,
-                messages=[{"role": "user", "content": chunk}],
-                label=f"format_md_codex[{len(chunk)}c]",
-                verbose=False,
-            )
-            results.append(formatted.strip())
+            results.append(_codex_format_sync(chunk).strip())
         except Exception as codex_exc:
             logger.warning("Codex 排版失败，回退 Gemini: %s", codex_exc)
             try:
-                formatted = complete_default(
-                    system=_FORMAT_SYSTEM,
-                    messages=[{"role": "user", "content": chunk}],
-                    label=f"format_md_gemini[{len(chunk)}c]",
-                    verbose=False,
-                )
-                results.append(formatted.strip())
+                results.append(_gemini_format_sync(chunk).strip())
             except Exception as gemini_exc:
                 logger.warning("Gemini 排版也失败，保留原文: %s", gemini_exc)
                 results.append(chunk)
