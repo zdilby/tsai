@@ -252,6 +252,9 @@ async def init_writing_tables():
           updated_at       TIMESTAMP DEFAULT NOW()
         )
     """)
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS word_count INTEGER DEFAULT 0;")
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_req TEXT DEFAULT '';")
+    await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS content_req TEXT DEFAULT '';")
     await database.execute("""
         CREATE INDEX IF NOT EXISTS idx_writing_tasks_user_id ON writing_tasks(user_id)
     """)
@@ -1002,7 +1005,13 @@ async def list_agent_c_runs(limit: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def create_writing_task(user_id: int, title: str = "") -> tuple[str, str]:
+async def create_writing_task(
+    user_id: int,
+    title: str = "",
+    word_count: int = 0,
+    style_req: str = "",
+    content_req: str = "",
+) -> tuple[str, str]:
     session_id = str(uuid.uuid4())
     task_id = str(uuid.uuid4())
     await database.execute(
@@ -1011,9 +1020,17 @@ async def create_writing_task(user_id: int, title: str = "") -> tuple[str, str]:
         values={"sid": session_id, "uid": user_id, "name": "[writing] " + (title or "")},
     )
     await database.execute(
-        """INSERT INTO writing_tasks (id, user_id, session_id, title)
-           VALUES (:tid, :uid, :sid, :title)""",
-        values={"tid": task_id, "uid": user_id, "sid": session_id, "title": title or ""},
+        """INSERT INTO writing_tasks (id, user_id, session_id, title, word_count, style_req, content_req)
+           VALUES (:tid, :uid, :sid, :title, :word_count, :style_req, :content_req)""",
+        values={
+            "tid": task_id,
+            "uid": user_id,
+            "sid": session_id,
+            "title": title or "",
+            "word_count": word_count or 0,
+            "style_req": style_req or "",
+            "content_req": content_req or "",
+        },
     )
     system_prompt = (
         f"你是一个写作助手。当前写作任务标题：{title}。\n"
