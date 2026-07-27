@@ -293,7 +293,7 @@ async def chat(background_tasks: BackgroundTasks,
     except Exception as e:
         logger.exception("Gemini API 调用失败: %s", e)
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用，请稍后重试")
-    answer = resp.text
+    answer = (resp.text or "").strip() or "（模型未输出文本，请重试）"
     usage = resp.usage_metadata
     tokens_in  = getattr(usage, "prompt_token_count",     0) or 0
     tokens_out = getattr(usage, "candidates_token_count", 0) or 0

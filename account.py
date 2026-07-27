@@ -80,7 +80,19 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
     token = create_access_token({"sub": user["username"]})
-    resp = JSONResponse({"msg": "ok", "is_admin": bool(user["is_admin"])})
+    has_sessions = await database.fetch_val(
+        """SELECT EXISTS(
+               SELECT 1 FROM sessions
+               WHERE user_id = :uid AND name IS NOT NULL
+                 AND (is_writing_session = FALSE OR is_writing_session IS NULL)
+           )""",
+        values={"uid": user["id"]},
+    )
+    resp = JSONResponse({
+        "msg": "ok",
+        "is_admin": bool(user["is_admin"]),
+        "has_sessions": bool(has_sessions),
+    })
     resp.set_cookie(
         key="access_token",
         value=token,

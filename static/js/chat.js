@@ -134,6 +134,7 @@ marked.use({
 
 // marked 对紧邻中文标点的 ** 有时不识别为粗体，做一次兜底替换
 function renderMarkdown(text) {
+    if (text == null) return '';
     let html = marked.parse(text);
     // 替换 marked 未处理的 **bold** 和 *italic*（排除已转换的 HTML 标签内容）
     html = html.replace(/\*\*([^*\n<>]+?)\*\*/g, '<strong>$1</strong>');
@@ -226,16 +227,37 @@ function makeSaveBtn(rawContent) {
 async function loadMessages() {
 	try {
 		const resp = await authFetch(`/messages/${session_id}`);
+		if (resp.status === 403) {
+			$chatBox.empty();
+			M.toast({ html: "无权访问该会话，请确认登录账号", classes: "red lighten-2" });
+			return;
+		}
+		if (resp.status === 404) {
+			$chatBox.empty();
+			M.toast({ html: "会话不存在", classes: "red lighten-2" });
+			return;
+		}
+		if (!resp.ok) {
+			throw new Error(`HTTP ${resp.status}`);
+		}
 		const data = await resp.json();
         $chatBox.empty();  // 清空再渲染
         data.forEach(msg => {
-            const rendered = renderMarkdown(msg.content);
-            const $msgDiv = $("<div>", { class: `message ${msg.role}` });
-            $msgDiv.append($("<div>", { class: "msg-body", html: rendered }));
-            if (msg.role === 'assistant') {
-                $msgDiv.append($("<div>", { class: "msg-actions" }).append(makeSaveBtn(msg.content)));
+            try {
+                const rendered = renderMarkdown(msg.content);
+                const $msgDiv = $("<div>", { class: `message ${msg.role}` });
+                $msgDiv.append($("<div>", { class: "msg-body", html: rendered }));
+                if (msg.role === 'assistant') {
+                    $msgDiv.append($("<div>", { class: "msg-actions" }).append(makeSaveBtn(msg.content)));
+                }
+                $chatBox.append($msgDiv);
+            } catch (renderErr) {
+                // 单条消息渲染失败（如内容为空/格式异常）不应中断其余消息的加载
+                console.error("消息渲染失败，已跳过:", msg, renderErr);
+                const $msgDiv = $("<div>", { class: `message ${msg.role}` });
+                $msgDiv.append($("<div>", { class: "msg-body", text: "（该条消息内容异常，无法显示）" }));
+                $chatBox.append($msgDiv);
             }
-            $chatBox.append($msgDiv);
         });
 
         // 自动滚动到底部

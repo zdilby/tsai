@@ -1212,7 +1212,8 @@ async def get_writing_sections(task_id: str) -> list[dict]:
     rows = await database.fetch_all(
         """SELECT id, task_id, section_index, heading, sub_outline, content,
                   word_count_target, status, last_generated_at, created_at, updated_at
-           FROM writing_sections WHERE task_id = :tid ORDER BY section_index""",
+           FROM writing_sections WHERE task_id = :tid AND status != 'archived'
+           ORDER BY section_index""",
         values={"tid": task_id},
     )
     return [dict(r) for r in rows]
@@ -1229,23 +1230,57 @@ async def get_writing_section(section_id: str, task_id: str) -> dict | None:
 
 
 async def upsert_writing_sections(task_id: str, sections: list[dict]) -> None:
-    """Replace all sections for a task with a new ordered list (from TOC sync)."""
-    await database.execute(
-        "DELETE FROM writing_sections WHERE task_id = :tid",
+    """Sync writing_sections to a new ordered heading list (from TOC save).
+
+    Matches existing rows by heading so re-saving a TOC with the same (or
+    reordered) titles keeps their content/status intact — only section_index,
+    and for not-yet-generated sections word_count_target, is refreshed.
+    Headings dropped from the new TOC are archived rather than deleted, so
+    generated content is never silently lost; a heading that reappears later
+    revives its archived row instead of starting over.
+    """
+    existing = await database.fetch_all(
+        "SELECT id, heading, status, content FROM writing_sections WHERE task_id = :tid",
         values={"tid": task_id},
     )
+    existing_by_heading = {row["heading"]: row for row in existing}
+    matched_ids = set()
+
     for idx, sec in enumerate(sections):
+        heading = sec.get("heading", "")
+        match = existing_by_heading.get(heading)
+        if match:
+            matched_ids.add(match["id"])
+            sets = ["section_index = :idx", "updated_at = NOW()"]
+            values = {"idx": idx, "sid": match["id"]}
+            if not match["content"]:
+                sets.append("word_count_target = :wc")
+                values["wc"] = sec.get("word_count_target", 0)
+            if match["status"] == "archived":
+                sets.append("status = 'pending'")
+            await database.execute(
+                f"UPDATE writing_sections SET {', '.join(sets)} WHERE id = :sid",
+                values=values,
+            )
+        else:
+            await database.execute(
+                """INSERT INTO writing_sections
+                   (task_id, section_index, heading, sub_outline, word_count_target, status)
+                   VALUES (:tid, :idx, :heading, :sub_outline, :wc, 'pending')""",
+                values={
+                    "tid": task_id,
+                    "idx": idx,
+                    "heading": heading,
+                    "sub_outline": sec.get("sub_outline", ""),
+                    "wc": sec.get("word_count_target", 0),
+                },
+            )
+
+    stale_ids = [row["id"] for row in existing if row["id"] not in matched_ids and row["status"] != "archived"]
+    for sid in stale_ids:
         await database.execute(
-            """INSERT INTO writing_sections
-               (task_id, section_index, heading, sub_outline, word_count_target, status)
-               VALUES (:tid, :idx, :heading, :sub_outline, :wc, 'pending')""",
-            values={
-                "tid": task_id,
-                "idx": idx,
-                "heading": sec.get("heading", ""),
-                "sub_outline": sec.get("sub_outline", ""),
-                "wc": sec.get("word_count_target", 0),
-            },
+            "UPDATE writing_sections SET status = 'archived', updated_at = NOW() WHERE id = :sid",
+            values={"sid": sid},
         )
 
 

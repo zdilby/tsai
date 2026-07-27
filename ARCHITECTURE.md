@@ -1,7 +1,7 @@
 # TSAI 项目架构文档
 
 > 本文档由 Claude Code 自动生成并维护，随代码变动同步更新。
-> 最后更新：2026-05-17
+> 最后更新：2026-07-26
 
 ---
 
@@ -92,6 +92,8 @@ tsai/
 
 ### 写作模块路由（`writing.py`，前缀 `/writing/`）
 
+所有路由（除 HTML 页面外）经 `require_write_access` 依赖校验：`is_admin` 或 `can_write=TRUE` 才放行，否则 403（HTML 页面 302 回首页）。
+
 | 方法 | 路径 | 功能 |
 |---|---|---|
 | `GET` | `/writing/` | 写作首页（自动跳转最新任务） |
@@ -99,13 +101,27 @@ tsai/
 | `POST` | `/writing/tasks` | 新建写作任务（同时创建 is_writing_session Session） |
 | `GET` | `/writing/tasks` | 获取用户全部写作任务列表 |
 | `GET` | `/writing/tasks/{task_id}` | 获取单个写作任务详情 |
-| `PATCH` | `/writing/tasks/{task_id}` | 更新写作任务设置（title/word_count/style_req/content_req/outline/reference_files） |
+| `PATCH` | `/writing/tasks/{task_id}` | 更新写作任务设置（title/word_count/style_req/content_req/outline/toc/reference_files，只发差异字段）。`toc` 变更时自动同步 `writing_sections`（按标题 upsert，均分字数目标） |
 | `DELETE` | `/writing/tasks/{task_id}` | 删除写作任务 |
 | `GET` | `/writing/tasks/{task_id}/content` | 获取最新写作内容（+version 号） |
 | `POST` | `/writing/tasks/{task_id}/content` | 保存写作内容（版本化，保留最近 3 版） |
+| `POST` | `/writing/tasks/{task_id}/format_content` | 全文 Markdown 排版（Codex 优先，失败回退 Gemini，双失败保留原文），保存为新版本 |
 | `GET` | `/writing/files` | 获取当前用户所有已处理完成的文件（供参考资料选择） |
+| `POST` | `/writing/generate_style` | SSE 流式生成风格描述（从 URL 网页或上传文档提取文本，附 `task_id` 时保存原文供后续风格蒸馏） |
 | `GET` | `/writing/tasks/{task_id}/generate_outline` | SSE 流式生成内容大纲 |
-| `POST` | `/writing/tasks/{task_id}/generate_content` | SSE 流式生成/优化写作内容（含 RAG 参考资料检索） |
+| `POST` | `/writing/tasks/{task_id}/generate_toc` | SSE 流式生成写作目录（TOC，5-10 条 `## ` 标题；有大纲则从大纲提炼，否则从任务设置生成） |
+| `POST` | `/writing/tasks/{task_id}/generate_outline_from_toc` | SSE 流式：由已保存的 TOC 反向生成逐章详细大纲 |
+| `POST` | `/writing/tasks/{task_id}/generate_content` | SSE 流式生成/优化写作内容（含 RAG 参考资料检索）；大纲 ≥2 章节且总字数=0 或 ≥3000 时自动切换为**逐章节生成**（`use_sectional`），每章独立调用并携带前文尾部 1200 字作衔接提示 |
+| `POST` | `/writing/tasks/{task_id}/chat` | 写作 AI 对话（全文级）；AI 用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` 包裹修改后全文 |
+| `GET` | `/writing/tasks/{task_id}/sections` | 获取任务的全部分段（`writing_sections`，按 `section_index` 排序） |
+| `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status） |
+| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落结尾 800 字作衔接），完成后段落状态置为 `draft` |
+| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/format` | 单段 Markdown 排版（同 Codex→Gemini 回退策略） |
+| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/chat` | 单段 AI 对话，AI 用 `[SECTION_UPDATE_START]...[SECTION_UPDATE_END]` 包裹修改后该段内容 |
+| `GET` | `/writing/tasks/{task_id}/full_content` | 拼接所有 `draft`/`confirmed` 状态段落为完整正文（分段视图 → 全文视图），响应含 `skipped_headings`（未生成/非 draft-confirmed 的章节标题列表） |
+| `POST` | `/writing/tasks/{task_id}/distill_style` | SSE 流式：将风格描述 + 参考原文蒸馏为结构化「风格技能手册」（6 节：语气腔调/句式结构/词汇风格/叙事节奏/过渡衔接/结构模式），存入 `writing_tasks.style_skills`，后续生成自动注入并优先于 `style_req` |
+| `POST` | `/writing/tasks/{task_id}/evaluate` | SSE 流式质量评估 Pipeline（阅读检查 → 风格比对，串行执行，见十一.4） |
+| `GET` | `/writing/tasks/{task_id}/evaluations/latest` | 获取最近一次评估结果 |
 
 ### 管理员路由（`admin.py`）
 
@@ -115,6 +131,7 @@ tsai/
 | `GET` | `/admin/user/{id}` | 用户详情页 |
 | `GET` | `/admin/session/{id}` | Session 详情页 |
 | `POST` | `/admin/user/{id}/set_admin` | 将指定用户提升为管理员 |
+| `POST` | `/admin/user/{id}/set_writing` | 授予/撤销该用户的写作模块访问权限（`can_write`） |
 | `POST` | `/admin/user/{id}/max_tokens` | 设置每日 Token 配额 |
 | `POST` | `/admin/user/{id}/max_file_size` | 设置最大文件大小 |
 | `POST` | `/admin/user/{id}/reset_password` | 强制重置密码 |
@@ -134,10 +151,10 @@ sessions           ← 对话 Session（含人格）
 messages           knowledge_base     upload_files        writing_tasks
 （消息 + token      （RAG 知识库       （文件上传状态        （写作任务设置
  统计 + 向量索引）    向量分块）          + 处理进度）           + session 绑定）
-                                                              ↓ 1:N
-                                                          writing_contents
-                                                          （版本化写作内容
-                                                           最多保留 3 版）
+                                                              ↓ 1:N              ↓ 1:N            ↓ 1:N
+                                                          writing_contents  writing_sections  writing_evaluations
+                                                          （版本化写作内容   （TOC 分段，      （质量评估记录：
+                                                           最多保留 3 版）    独立生成/状态）    阅读+风格评分）
 
 invite_codes       ← 邀请码（独立表）
 ```
@@ -149,6 +166,7 @@ id              SERIAL PRIMARY KEY
 username        TEXT UNIQUE NOT NULL
 password_hash   TEXT NOT NULL
 is_admin        BOOLEAN DEFAULT FALSE
+can_write       BOOLEAN NOT NULL DEFAULT FALSE  -- 写作模块访问权限（管理员在 /admin/users 授予）
 max_daily_tokens  INTEGER DEFAULT 100000   -- 0 = 不限
 max_file_size_mb  INTEGER DEFAULT 10       -- 0 = 不限
 created_at      TIMESTAMP DEFAULT NOW()
@@ -234,9 +252,15 @@ user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE
 session_id      UUID REFERENCES sessions(id) ON DELETE CASCADE  -- 写作专属 Session
 title           TEXT DEFAULT '未命名写作'
 word_count      INTEGER DEFAULT 0         -- 0 = 不限
-style_req       TEXT DEFAULT ''           -- 风格要求
+style_req       TEXT DEFAULT ''           -- 风格要求（原始文字描述）
 content_req     TEXT DEFAULT ''           -- 内容要求
 outline         TEXT DEFAULT ''           -- 内容大纲（可手动修改或 AI 生成）
+outline_updated_at TIMESTAMPTZ            -- 大纲最近更新时间（驱动前端"过期"标记）
+toc             TEXT DEFAULT ''           -- 写作目录（TOC，简化版大纲，驱动 writing_sections 生成）
+toc_updated_at  TIMESTAMPTZ               -- TOC 最近更新时间
+style_skills    TEXT DEFAULT ''           -- AI 蒸馏出的结构化「风格技能手册」，生成时优先于 style_req
+style_skills_updated_at TIMESTAMPTZ
+style_source_text TEXT DEFAULT ''         -- 风格参考原文（来自 generate_style 的 URL/文件抓取），供蒸馏使用
 reference_files TEXT[] DEFAULT '{}'       -- 参考资料文件名列表（RAG 来源过滤）
 created_at      TIMESTAMP DEFAULT NOW()
 ```
@@ -254,6 +278,43 @@ created_at  TIMESTAMP DEFAULT NOW()
 ```
 
 每个 task 最多保留最近 3 个版本；`save_writing_content` 在版本数超 3 时删除最旧版本（`ORDER BY version ASC LIMIT 1`）。`get_writing_content` 返回最新版本（`ORDER BY version DESC LIMIT 1`）。
+
+### `writing_sections`（分段写作，写作模块）
+
+```sql
+id                UUID PRIMARY KEY DEFAULT gen_random_uuid()
+task_id           UUID NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE
+section_index     INTEGER NOT NULL DEFAULT 0   -- 章节顺序
+heading           TEXT NOT NULL DEFAULT ''     -- 章节标题（来自 TOC）
+sub_outline       TEXT DEFAULT ''              -- 该章节的详细大纲片段
+content           TEXT DEFAULT ''              -- 该章节正文
+word_count_target INTEGER DEFAULT 0            -- 目标字数（0 = 按任务总字数/章节数均分）
+status            TEXT NOT NULL DEFAULT 'pending'  -- pending | draft | confirmed
+last_generated_at TIMESTAMPTZ
+created_at        TIMESTAMPTZ DEFAULT NOW()
+updated_at        TIMESTAMPTZ DEFAULT NOW()
+```
+
+索引：`idx_writing_sections_task_id` on `(task_id, section_index)`
+
+保存 TOC（`PATCH /writing/tasks/{id}` 传 `toc`）时，`writing.py:_parse_toc` 解析出标题列表，`upsert_writing_sections` 按**标题做 diff 合并**同步该任务的 `writing_sections`：标题能在旧表中匹配到的行只刷新 `section_index`（未生成过内容的还会刷新 `word_count_target`），`content`/`status` 保持不变；新 TOC 里被移除的标题**归档**（`status='archived'`）而非删除，避免生成内容被静默清空；归档行对应的标题若后续重新出现在 TOC 里则自动复活（`status` 由 `archived` 回退为 `pending`）。`get_writing_sections()` 统一过滤掉 `archived` 行，所以段落列表、单段生成的衔接上下文、字数目标计算都不会看到已归档的段落。单段生成携带上一个已生成段落结尾 800 字做衔接提示；`GET .../full_content` 拼接所有 `draft`/`confirmed` 段为完整正文（未生成的段落标题收集进 `skipped_headings` 一并返回），供"分段视图 ↔ 全文视图"切换。
+
+### `writing_evaluations`（多 Agent 质量评估，写作模块）
+
+```sql
+id                 UUID PRIMARY KEY DEFAULT gen_random_uuid()
+task_id            UUID NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE
+readability_score  INTEGER DEFAULT 0     -- 阅读检查 Agent 评分（0-100）
+readability_report TEXT DEFAULT ''
+style_score        INTEGER DEFAULT 0     -- 风格比对 Agent 评分（0-100，无风格参考时为 0）
+style_report       TEXT DEFAULT ''
+overall_score      INTEGER DEFAULT 0     -- 有风格参考：两项均分；否则等于 readability_score
+created_at         TIMESTAMPTZ DEFAULT NOW()
+```
+
+索引：`idx_writing_evaluations_task_id` on `(task_id, created_at DESC)`
+
+详见十一.4「多 Agent 质量评估 Pipeline」。
 
 ### `prompt_versions`（Phase 3a）
 
@@ -519,6 +580,9 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `AGENT_C_MIN_TRACES` | `5` | Phase 3d 每个版本至少这么多 trace 才比较 |
 | `HTTP_PROXY` | — | 可选 HTTP 代理 |
 | `ANTHROPIC_API_KEY` | — | Claude API 密钥（仅 `agent_system/` 子系统使用） |
+| `CODEX_API_KEY` | — | 写作模块 Markdown 排版首选后端（OpenAI 兼容端点密钥）；未配置则直接跳过，回退 Gemini |
+| `CODEX_BASE_URL` | — | Codex 兼容端点 base URL |
+| `CODEX_MODEL` | `gpt-4o` | Codex 排版调用的模型名 |
 
 > `agent_system/llm.py` 在导入时自动加载项目根 `.env`（通过 `python-dotenv`），与 `settings.py` 的 Pydantic Settings 加载模式一致。
 
@@ -540,14 +604,15 @@ Session 有三种状态：
 
 ### 概述
 
-写作模块是独立于对话功能的 AI 辅助写作系统，提供结构化的写作任务管理、Markdown 编辑器、AI 生成大纲 / 内容、以及实时 AI 对话修改写作内容的能力。
+写作模块是独立于对话功能的 AI 辅助写作系统，提供结构化的写作任务管理、Markdown 编辑器、TOC/分段生成、风格蒸馏、多 Agent 质量评估，以及实时 AI 对话修改写作内容的能力。**访问受 `users.can_write` 权限门控**：仅 `is_admin` 或 `can_write=TRUE` 的用户可用（`require_write_access` 依赖），管理员在 `/admin/users` 逐用户授予。
 
 ### 架构设计
 
 - **写作任务**：每个任务对应一条 `writing_tasks` 记录 + 一个绑定的 `is_writing_session` Session
 - **RAG 集成**：写作任务可选择参考文件列表，生成内容时仅从这些文件的知识库 chunk 中检索
-- **AI 对话修改**：利用现有 `/chat` 接口，在绑定的 writing session 中对话，AI 用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` markers 包裹新内容，前端自动检测并更新编辑器
+- **AI 对话修改**：`/writing/tasks/{id}/chat`（全文级，`writing.py` 独立实现，不复用 `/chat`），默认只讨论/答疑，仅在用户确认后才用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` markers 包裹新内容供前端抽取更新（详见下文"AI 对话面板"）；分段视图下对应 `/sections/{id}/chat`，markers 换成 `[SECTION_UPDATE_START]...[SECTION_UPDATE_END]`
 - **内容版本化**：每次保存写作内容都生成新版本，数据库保留最近 3 版
+- **两种写作粒度**：全文一次性生成/编辑（`outline` + `writing_contents`），或 TOC 驱动的分段生成/编辑（`toc` + `writing_sections`），两者共享同一份 `writing_tasks` 设置（标题/字数/风格/内容要求）
 
 ### 前端布局（`templates/writing.html`）
 
@@ -586,16 +651,105 @@ body (flex row, ≥993px)
 - `enterEditMode()` / `exitEditMode(newContent)` 管理状态切换
 
 **AI 对话面板**（`#ai-chat-panel`）：
-- `chatSessionId` 指向当前写作任务的绑定 Session
-- 发送消息调用 `/chat` POST（FormData），携带 `session_id` + `source_files`
-- 检测 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]`：自动抽取新内容 → `exitEditMode()` + 自动保存
+- `chatSessionId` 指向当前写作任务的绑定 Session；发送消息期间显示闪烁的 `···`占位气泡（复用主对话模块 `.dots`/`@keyframes blink` 样式），收到回复/出错后移除
+- 对话目标随 `viewMode` 实时切换：全文视图 → `POST /tasks/{id}/chat`；分段视图且有段落处于"放大"状态 → `POST /tasks/{id}/sections/{expandedSectionId}/chat`；分段视图但无放大段落 → 提示用户先放大一个段落，不发送请求
+- **讨论优先，修改需二次确认**：`writing.py:_chat_system_instruction()`（全文/分段共用同一套规则文本）要求模型默认只回答/讨论（含写作任务之外的一般性问题，通过 Google Search grounding tool 回答），仅当检测到用户明确的修改意图时才在本轮反问确认（"是否需要我将……修改为……？"），必须在**下一轮**用户给出肯定答复（参考 `get_context()` 拉取的最近对话历史判断）后才允许输出 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` / `[SECTION_UPDATE_START]...[SECTION_UPDATE_END]` 标记；前端检测到标记才抽取新内容 → 全文走 `exitEditMode()` + 自动保存 + 排版，分段走 `PATCH .../sections/{id}` + `loadSections()` 刷新
+- **对话历史持久化**：两个 chat 端点都会把用户提问和"剥离标记后的展示文本"（`_extract_chat_display()`，与前端渲染逻辑保持一致）存入 `messages` 表（`save_message`），刷新页面后 `loadChatHistory()` 从 `GET /messages/{session_id}` 拉取即可看到完整历史；全文与分段对话共享同一条任务 session 的历史，不做范围区分
 
 ### 关键实现细节
 
 - **写作 Session 隔离**：`GET /sessions` 增加 `AND (is_writing_session = FALSE OR is_writing_session IS NULL)` 过滤，写作 session 不出现在对话页面
-- **SSE 流式输出**：`generate_outline` 和 `generate_content` 两个端点均返回 `StreamingResponse(media_type="text/event-stream")`，格式 `data: chunk\n\n`，结束标志 `data: [DONE]\n\n`
+- **SSE 流式输出**：写作模块所有流式端点（`generate_style`/`generate_outline`/`generate_content`/`generate_toc`/`generate_outline_from_toc`/分段 `generate`/`distill_style` 等）均返回 `StreamingResponse(media_type="text/event-stream")`；每个文本块经 `writing.py:_sse_chunk()` JSON 编码后再放入 `data: ...\n\n` 帧（而非裸文本拼接），避免模型输出中的换行符被前端按行解析的 SSE 逻辑误判为帧结束、导致内容截断；前端 `decodeSseData()` 对应解码，结束标志仍是 `data: [DONE]\n\n`
 - **参考资料 RAG 过滤**：`query_rag()` 支持 `source_files` 参数，只从指定文件的 chunks 中检索
 - **内容流式显示**：SSE 流式输出时用 `preview.textContent +=` 追加（安全），流完成后调用 `exitEditMode()` 渲染 Markdown
+
+### 十一.4 TOC / 分段写作系统
+
+**目的**：长文章（或需要精细控制每个章节）时，绕开"一次性生成全文"的模式，改为目录驱动的逐段生成/编辑/确认。
+
+**流程**：
+
+```
+1. 生成/编写 TOC（POST generate_toc，SSE；或手动在弹窗里编辑）
+   ├─ 已有详细大纲 → 从大纲提炼 5-10 条 "## 标题"
+   └─ 无大纲 → 直接从任务标题/字数/内容要求生成
+2. 保存 TOC（PATCH tasks/{id} 传 toc）
+   └─ writing.py:_parse_toc 解析标题 → upsert_writing_sections 按标题 diff 合并同步 writing_sections
+      （同名标题保留 content/status，只重排 section_index；未生成过的刷新 word_count_target；
+       消失的标题归档而非删除，防止已生成内容被清空；标题复现则复活归档行）
+3.（可选）generate_outline_from_toc：由 TOC 反推逐章详细大纲，回填 outline 字段
+4. 每个 section 卡片独立操作：
+   ├─ generate：SSE 生成本段内容，携带"上一个已生成段落结尾 800 字"做衔接，完成后 status→draft
+   ├─ format：Codex→Gemini 排版（同全文排版逻辑）
+   ├─ chat：段落级 AI 对话修改（[SECTION_UPDATE_START]标记，规则见上文"AI 对话面板"的"讨论优先，修改需二次确认"）
+   ├─ 放大/缩小：内容预览右下角（与"目标字数"同一行）图标，`max-height` 在默认 220px 与不限之间切换；
+   │  同一时刻只允许一个段落处于放大状态，`expandedSectionId` 跨 `loadSections()` 重渲染保持
+   ├─ 编辑（手动编辑浮窗）：仅当该段已放大且非 confirmed 时可点；`sectionDraftEdit = {sectionId, draftContent}`
+   │  为纯前端草稿（不落库），在独立于 `#sections-container` 的 `#section-edit-portal` 浮层中渲染成一个
+   │  textarea——`#sections-container` 收窄为 `min(820px, 50%-10px)`（`.split-active`），浮窗按原卡片
+   │  `getBoundingClientRect()` 动态定位在其右侧，两者作为整体在 `#content-area` 内居中
+   │  （`positionSectionEditPortal()`）；textarea 内容随输入实时同步回 `draftContent`，只有点击
+   │  "替换原文"才 PATCH 持久化，"取消替换"则整个丢弃
+   └─ 手动切换 status：pending → draft → confirmed
+5. full_content：拼接所有 draft/confirmed 段落 → 完整正文（跳过的标题列入 skipped_headings）；
+   前端"合并为全文"点击时若已有全文内容会先 `confirm()` 提示"将完全替换、不可撤销"，确认后保存并自动触发排版+质量评估
+```
+
+**AI 面板与"放大段落"联动**：分段视图下，AI 对话面板/质量评估面板作用于当前放大的段落（`expandedSectionId`），而非全文；没有段落处于放大状态时，对话面板发送前提示、评估面板直接跳过不请求。切回全文视图后两者自动恢复为全文目标（判断逻辑在调用时读取 `viewMode`，无需额外状态同步）。"更新内容"按钮（全文一次性重新生成）在分段视图下点击会提示先"合并为全文"，而不是静默按全文大纲重新生成、丢弃分段草稿。
+
+**前端**（`templates/writing.html`）：写作目录弹窗（AI 生成 + "双向生成"——大纲↔TOC 互相推导）；分段卡片视图，含状态徽章、生成/排版/确认/放大操作、大纲变更后的"⚠过期"标记（比较 `outline_updated_at`/`toc_updated_at` 时间戳）；分段/全文视图切换；合并结果的 toast 提示会附上被跳过的章节标题。
+
+**过期检测**：`outline`、`toc` 每次更新都各自打时间戳（`outline_updated_at`/`toc_updated_at`），前端据此判断"大纲改了但 TOC/分段还没同步"，提示用户重新生成。
+
+**已知坑：flex 容器内 `<textarea>` 不会自动撑满交叉轴高度**——`.section-edit-window-body`（编辑浮窗内容区）是 `display:flex` 的行容器，早期只给内部 `<textarea>` 设了 `flex:1`（只影响主轴/宽度），导致 `<textarea>` 退回浏览器默认 `rows` 高度（约 45px）而非撑满父容器；`draftContent`/`textarea.value` 数据其实完整，只是超出这 45px 的部分被裁进不可见的 `overflow-y:auto` 滚动区域，看起来像"内容只剩标题一行"。修复：显式给 `.section-edit-window-body textarea` 加 `height: 100%`（`<textarea>` 作为表单控件不会像普通块级元素一样被 `align-items:stretch` 自动拉伸）。
+
+### 十一.5 风格蒸馏 + 多 Agent 质量评估 Pipeline
+
+**目的**：把模糊的"风格要求"文字转成结构化、可执行的规则手册；生成/修改内容后自动跑质量检查，给出可操作的改进建议。
+
+**风格蒸馏**（`POST /distill_style`，SSE）：
+
+- 输入来源二选一或都给：`style_req`（用户文字描述）+ `style_source_text`（`generate_style` 从 URL/上传文档抓取的参考原文，最多 6000 字，随 `task_id` 存入 `writing_tasks.style_source_text`）
+- 输出：结构化「风格技能手册」（6 节，每节 2-3 条可操作规则）——语气与腔调 / 句式结构 / 词汇风格 / 叙事节奏 / 过渡与衔接 / 结构模式
+- 存入 `writing_tasks.style_skills`；此后 `generate_content` / `generate_section_content` 都优先注入 `style_skills`（而非原始 `style_req`）
+
+**质量评估 Pipeline**（`POST /evaluate`，可选 query 参数 `section_id`，SSE，两个 Agent 串联执行）：
+
+- 不传 `section_id`：评估 `writing_contents` 最新版本全文，结果写入 `writing_evaluations`（`GET .../evaluations/latest` 展示的即此记录）
+- 传 `section_id`：改为评估该段落 `writing_sections.content`，**不写入** `writing_evaluations`（该表只承载全文评估历史，避免段落评估污染"最近一次全文评估"的语义）；前端分段视图下点"运行质量评估"时自动带上当前放大段落的 id
+
+```
+Stage 1 — 阅读检查 Agent（始终执行）
+  评估维度：逻辑连贯性 / 段落长度（150-300字建议）/ 重复表达 / 标题内容一致性 / 整体流畅度
+  输出：0-100 评分 + 分段位置具体问题列表 + 1-2 句总结
+
+Stage 2 — 风格比对 Agent（仅当存在风格参考时执行：style_skills / style_req / style_source_text 任一非空）
+  参考素材优先级：style_skills > style_req，再叠加 style_source_text 节选 + reference_files 的 RAG 片段
+  评估维度（各 0-100，四维平均为总分）：语气腔调匹配度 / 句式结构相似度 / 词汇风格一致性 / 叙事节奏吻合度
+  输出：四维分项分析 + 3 条重点改进建议（附原文改法示例）
+
+overall_score = 有风格参考 → (readability + style) // 2；否则 = readability
+结果写入 writing_evaluations，前端展示评分卡片 + 展开式报告
+```
+
+- SSE 消息为 JSON（非纯文本 delta）：`{"type":"stage","stage":"readability"|"style","status":"running"|"done",...}` → `{"type":"complete","overall_score":N,"has_style":bool}`
+- 评分从报告文本用正则提取（如 `评分[：:]\s*(\d+)`），解析失败时回退 70 分、异常时记 0 分并附错误信息
+- 内容保存/排版完成后前端自动触发一次评估；任务加载时展示上次评估结果（`GET .../evaluations/latest`）
+
+### 十一.6 Markdown 排版（Codex 优先 + Gemini 回退）
+
+`format_content` / 单段 `format` 均调用 `writing.py:_format_markdown_sync`：
+
+```
+1. _split_for_format：优先按 "## " 章节边界切块；单块超 2200 字时在句末（。？！…\n）就近再切
+2. 每块 <30 字直接跳过（保留原样，不值得调用模型）
+3. 逐块尝试 Codex（OpenAI 兼容端点，CODEX_API_KEY/CODEX_BASE_URL/CODEX_MODEL 未配置则直接跳过）
+4. Codex 失败 → 回退项目 Gemini 客户端（同步 generate_content，system_instruction 为排版规则）
+5. 两者都失败 → 保留原文块，仅记 warning 日志（不中断整体流程）
+6. 各块用 "\n\n" 拼接，覆盖保存为新版本
+```
+
+排版规则（`_FORMAT_SYSTEM`）：段落间必须空行、章节标题独占一行前后空行、完整保留原文不增删内容、超 150 字长段按叙事逻辑分段。`asyncio.to_thread` 包装同步调用，避免阻塞事件循环。
 
 ---
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ from account import get_current_user
 from backend.db import (
     database,
     update_session_instruction,
+    save_message,
+    get_context,
     create_writing_task,
     get_writing_tasks,
     get_writing_task,
@@ -130,6 +133,61 @@ def _format_markdown_sync(raw: str) -> str:
                 logger.warning("Gemini 排版也失败，保留原文: %s", gemini_exc)
                 results.append(chunk)
     return "\n\n".join(results)
+
+
+def _chat_system_instruction(scope_label: str, start_mark: str, end_mark: str, content_note: str = "") -> str:
+    """Build the discuss-first / confirm-before-editing system prompt shared by full-text and section chat.
+
+    The model must never edit on the same turn it detects an edit request — it has to propose
+    the change and wait for an explicit "yes" on a later turn (checked against chat history),
+    otherwise every casual remark risked being read as an authorization to rewrite the content.
+    """
+    return (
+        f"你是一个专业的写作助手，与用户讨论当前{scope_label}内容。\n"
+        "规则：\n"
+        f"1.【默认只讨论，不修改】你的职责是回答问题、讨论{scope_label}内容、给建议，"
+        "包括与写作任务无关的一般性问题（常识、历史、时效性信息等，包括需要联网搜索确认的问题）——"
+        "这些都应直接正常回答，不要联想到修改内容，也不要输出任何修改标记。\n"
+        f"2.【提出修改需先征询同意】只有当用户在最新消息中明确希望你修改/改进/调整{scope_label}内容时，"
+        "你才可以考虑修改，但本轮**不能**直接输出修改后的内容——而是用一句话说明你打算如何修改，"
+        "并反问用户确认，例如：“是否需要我将……修改为……，帮你修改该处内容？”，之后等待用户回复，本轮不要输出任何标记。\n"
+        "3.【获得同意后才可执行】只有当结合对话历史判断，你在上一轮已经提出过具体的修改方案并询问确认，"
+        "且用户在当前这轮消息中明确表示同意（如“好的”“可以”“是的”“请改”“同意”“确认”等肯定回复）时，"
+        "才可以在本轮回复末尾输出以下标记，附上完整修改后的内容（Markdown 格式），"
+        "标记之后另起一行用 1-2 句话说明改动要点：\n"
+        f"{start_mark}\n"
+        f"（完整的修改后{scope_label}内容，保留原有结构，仅修改已获同意的部分，字数不得少于原文{content_note}）\n"
+        f"{end_mark}\n"
+        "改动说明...\n"
+        "4. 除第 3 条情形外，任何时候都不要输出修改标记——哪怕用户的话听起来很像是要求修改，也要先走第 2 条的征询流程。\n"
+        f"5. 执行修改时，务必保持整体字数规模，不可随意删减段落。"
+    )
+
+
+def _extract_chat_display(answer: str, start_mark: str, end_mark: str, fallback: str) -> str:
+    """Strip the update-markers block from a chat reply, returning only the human-readable part.
+
+    Mirrors the parsing the frontend does to render the assistant bubble, so the persisted
+    chat history (for reload) matches what was actually shown live rather than raw markers.
+    """
+    start_idx = answer.find(start_mark)
+    end_idx = answer.find(end_mark)
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        explanation = answer[end_idx + len(end_mark):].strip()
+        return explanation or fallback
+    return answer
+
+
+def _sse_chunk(text: str) -> str:
+    """Format a streamed text chunk as an SSE 'data:' frame.
+
+    JSON-encodes the chunk so an embedded newline (common mid-sentence when
+    Gemini streams multi-line markdown) can't be mistaken for the blank line
+    that ends an SSE frame — the naive f"data: {text}\\n\\n" form silently
+    drops everything after the first embedded newline once the frontend's
+    line-based parser only recognizes lines starting with "data: ".
+    """
+    return f"data: {json.dumps(text, ensure_ascii=False)}\n\n"
 
 
 writing_router = APIRouter()
@@ -378,7 +436,7 @@ async def generate_style(
             )
             async for chunk in stream:
                 if chunk.text:
-                    yield f"data: {chunk.text}\n\n"
+                    yield _sse_chunk(chunk.text)
         except Exception as e:
             logger.exception("风格生成失败: %s", e)
             yield f"data: 生成失败：{e}\n\n"
@@ -413,7 +471,7 @@ async def generate_outline(task_id: str, user: dict = Depends(require_write_acce
             )
             async for chunk in stream:
                 if chunk.text:
-                    yield f"data: {chunk.text}\n\n"
+                    yield _sse_chunk(chunk.text)
         except Exception as e:
             logger.exception("写作大纲生成失败: %s", e)
             yield f"data: 生成失败：{e}\n\n"
@@ -499,7 +557,7 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
                     async for chunk in stream:
                         if chunk.text:
                             accumulated += chunk.text
-                            yield f"data: {chunk.text}\n\n"
+                            yield _sse_chunk(chunk.text)
                     accumulated += "\n\n"
                 except Exception as e:
                     logger.exception("章节内容生成失败 (section %d): %s", i, e)
@@ -528,7 +586,7 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
                 )
                 async for chunk in stream:
                     if chunk.text:
-                        yield f"data: {chunk.text}\n\n"
+                        yield _sse_chunk(chunk.text)
             except Exception as e:
                 logger.exception("写作内容生成失败: %s", e)
                 yield f"data: 生成失败：{e}\n\n"
@@ -567,24 +625,21 @@ async def writing_task_chat(
         )
         rag_text = "\n".join(r["content"] for r in rag_results)
 
-    system_instruction = (
-        "你是一个专业的写作助手，协助用户创作和改进文章。\n"
-        "规则：\n"
-        "1. 若用户要求修改/改进/调整文章内容，请在回复末尾用以下标记输出完整修改后的文章（Markdown 格式）："
-        "标记之后另起一行用 2-4 句话说明改动要点：\n"
-        "[WRITING_UPDATE_START]\n"
-        "（完整的修改后文章，保留原有结构，仅修改用户要求的部分，字数不得少于原文）\n"
-        "[WRITING_UPDATE_END]\n"
-        "改动说明...\n"
-        "2. 若用户只是提问、讨论或请求意见，不需要修改文章，正常回复即可。\n"
-        "3. 修改文章时，务必保持整体字数规模，不可随意删减段落。"
-    )
+    system_instruction = _chat_system_instruction("文章", "[WRITING_UPDATE_START]", "[WRITING_UPDATE_END]")
 
     content_block = (
         f"\n\n## 当前文章内容（共约 {len(current_content)} 字）\n\n{current_content}"
         if current_content else "\n\n## 当前文章内容\n\n（尚未生成内容）"
     )
     rag_block = f"\n\n## 参考资料片段\n\n{rag_text}" if rag_text else ""
+
+    await save_message(task["session_id"], "user", message)
+    context = await get_context(task["session_id"], limit=settings.max_history_turns)
+    history_text = "\n".join(f"{c['role']}: {c['content']}" for c in context)
+    history_block = (
+        f"\n\n## 最近对话历史（判断是否已提出修改方案并获得同意时请参考）\n{history_text}"
+        if history_text else ""
+    )
 
     prompt = (
         f"## 写作任务\n"
@@ -595,11 +650,14 @@ async def writing_task_chat(
         f"大纲：\n{task['outline']}"
         f"{content_block}"
         f"{rag_block}"
-        f"\n\n## 用户指令\n\n{message}"
+        f"{history_block}"
+        f"\n\n## 用户最新消息\n\n{message}"
     )
 
+    grounding_tool = gtypes.Tool(google_search=gtypes.GoogleSearch())
     config = gtypes.GenerateContentConfig(
         system_instruction=system_instruction,
+        tools=[grounding_tool],
         max_output_tokens=65536,
     )
 
@@ -613,6 +671,12 @@ async def writing_task_chat(
     except Exception as e:
         logger.exception("写作对话生成失败: %s", e)
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用")
+
+    display_answer = _extract_chat_display(
+        answer, "[WRITING_UPDATE_START]", "[WRITING_UPDATE_END]",
+        fallback="✓ 已根据你的指令修改了写作内容",
+    )
+    await save_message(task["session_id"], "assistant", display_answer)
 
     return {"answer": answer}
 
@@ -661,7 +725,7 @@ async def generate_toc(task_id: str, user: dict = Depends(require_write_access))
             )
             async for chunk in stream:
                 if chunk.text:
-                    yield f"data: {chunk.text}\n\n"
+                    yield _sse_chunk(chunk.text)
         except Exception as e:
             logger.exception("TOC 生成失败: %s", e)
             yield f"data: 生成失败：{e}\n\n"
@@ -697,7 +761,7 @@ async def generate_outline_from_toc(task_id: str, user: dict = Depends(require_w
             )
             async for chunk in stream:
                 if chunk.text:
-                    yield f"data: {chunk.text}\n\n"
+                    yield _sse_chunk(chunk.text)
         except Exception as e:
             logger.exception("从 TOC 生成大纲失败: %s", e)
             yield f"data: 生成失败：{e}\n\n"
@@ -801,7 +865,7 @@ async def generate_section_content(
             async for chunk in stream:
                 if chunk.text:
                     accumulated.append(chunk.text)
-                    yield f"data: {chunk.text}\n\n"
+                    yield _sse_chunk(chunk.text)
         except Exception as e:
             logger.exception("章节内容生成失败: %s", e)
             yield f"data: 生成失败：{e}\n\n"
@@ -864,12 +928,9 @@ async def section_chat(
         )
         rag_text = "\n".join(r["content"] for r in rag_results)
 
-    system_instruction = (
-        "你是一个专业的写作助手，协助用户创作和改进指定章节。\n"
-        "若用户要求修改章节内容，在回复末尾用以下标记输出完整修改后的章节（Markdown，含 ## 标题）：\n"
-        "[SECTION_UPDATE_START]\n（完整修改后章节内容）\n[SECTION_UPDATE_END]\n"
-        "标记后另起一行用 1-2 句话说明改动要点。\n"
-        "若用户只是提问或讨论，正常回复即可，无需输出标记。"
+    system_instruction = _chat_system_instruction(
+        "章节", "[SECTION_UPDATE_START]", "[SECTION_UPDATE_END]",
+        content_note="，须包含 ## 章节标题",
     )
 
     content_block = (
@@ -878,13 +939,27 @@ async def section_chat(
     )
     rag_block = f"\n\n## 参考资料片段\n\n{rag_text}" if rag_text else ""
 
+    await save_message(task["session_id"], "user", message)
+    context = await get_context(task["session_id"], limit=settings.max_history_turns)
+    history_text = "\n".join(f"{c['role']}: {c['content']}" for c in context)
+    history_block = (
+        f"\n\n## 最近对话历史（判断是否已提出修改方案并获得同意时请参考）\n{history_text}"
+        if history_text else ""
+    )
+
     prompt = (
         f"## 写作任务\n标题：{task['title']}\n风格：{task['style_req']}\n内容要求：{task['content_req']}\n"
         f"## 当前章节：{section['heading']}\n章节大纲：{section.get('sub_outline', '')}"
-        f"{content_block}{rag_block}\n\n## 用户指令\n\n{message}"
+        f"{content_block}{rag_block}{history_block}\n\n## 用户最新消息\n\n{message}"
     )
 
-    config = gtypes.GenerateContentConfig(system_instruction=system_instruction, max_output_tokens=65536)
+    grounding_tool = gtypes.Tool(google_search=gtypes.GoogleSearch())
+    config = gtypes.GenerateContentConfig(
+        system_instruction=system_instruction,
+        tools=[grounding_tool],
+        max_output_tokens=65536,
+    )
+
     try:
         resp = await client.aio.models.generate_content(
             model=settings.generation_model, contents=prompt, config=config,
@@ -893,6 +968,12 @@ async def section_chat(
     except Exception as e:
         logger.exception("章节对话生成失败: %s", e)
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用")
+
+    display_answer = _extract_chat_display(
+        answer, "[SECTION_UPDATE_START]", "[SECTION_UPDATE_END]",
+        fallback="✓ 已根据你的指令修改了该段落内容",
+    )
+    await save_message(task["session_id"], "assistant", display_answer)
 
     return {"answer": answer}
 
@@ -987,7 +1068,7 @@ async def distill_style(task_id: str, user: dict = Depends(require_write_access)
             async for chunk in stream:
                 if chunk.text:
                     accumulated.append(chunk.text)
-                    yield f"data: {chunk.text}\n\n"
+                    yield _sse_chunk(chunk.text)
         except Exception as e:
             logger.exception("风格蒸馏失败: %s", e)
             yield f"data: 蒸馏失败：{e}\n\n"
@@ -1006,16 +1087,22 @@ async def distill_style(task_id: str, user: dict = Depends(require_write_access)
 
 
 @writing_router.post("/tasks/{task_id}/evaluate")
-async def evaluate_content(task_id: str, user: dict = Depends(require_write_access)):
+async def evaluate_content(task_id: str, section_id: Optional[str] = None, user: dict = Depends(require_write_access)):
     await _ensure_task_owner(task_id, user["id"])
     task = await get_writing_task(task_id, user["id"])
     if not task:
         raise HTTPException(status_code=404, detail="写作任务不存在")
 
-    content_data = await get_writing_content(task_id)
-    content = (content_data.get("content") or "") if content_data else ""
-    if not content.strip():
-        raise HTTPException(status_code=400, detail="暂无内容可评估")
+    if section_id:
+        section = await get_writing_section(section_id, task_id)
+        if not section or not (section.get("content") or "").strip():
+            raise HTTPException(status_code=400, detail="该段落暂无内容可评估")
+        content = section["content"]
+    else:
+        content_data = await get_writing_content(task_id)
+        content = (content_data.get("content") or "") if content_data else ""
+        if not content.strip():
+            raise HTTPException(status_code=400, detail="暂无内容可评估")
 
     style_skills = (task.get("style_skills") or "").strip()
     style_req = (task.get("style_req") or "").strip()
@@ -1036,10 +1123,8 @@ async def evaluate_content(task_id: str, user: dict = Depends(require_write_acce
             pass
 
     async def gen_eval():
-        import json as _json
-
         # --- Stage 1: Readability ---
-        yield f"data: {_json.dumps({'type':'stage','stage':'readability','status':'running'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type':'stage','stage':'readability','status':'running'}, ensure_ascii=False)}\n\n"
         readability_score, readability_report = 0, ""
         try:
             prompt = _READABILITY_PROMPT_TMPL.format(content=content[:8000])
@@ -1054,13 +1139,13 @@ async def evaluate_content(task_id: str, user: dict = Depends(require_write_acce
         except Exception as e:
             readability_report = f"评估失败：{e}"
             readability_score = 0
-        yield f"data: {_json.dumps({'type':'stage','stage':'readability','status':'done','score':readability_score,'report':readability_report}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type':'stage','stage':'readability','status':'done','score':readability_score,'report':readability_report}, ensure_ascii=False)}\n\n"
 
         # --- Stage 2: Style Comparison ---
         style_score, style_report = None, ""
         has_style_ref = bool(style_skills or style_req or style_source)
         if has_style_ref:
-            yield f"data: {_json.dumps({'type':'stage','stage':'style','status':'running'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type':'stage','stage':'style','status':'running'}, ensure_ascii=False)}\n\n"
             ref_parts = []
             if style_skills:
                 ref_parts.append(f"【风格技能手册】\n{style_skills}")
@@ -1086,22 +1171,25 @@ async def evaluate_content(task_id: str, user: dict = Depends(require_write_acce
             except Exception as e:
                 style_report = f"评估失败：{e}"
                 style_score = 0
-            yield f"data: {_json.dumps({'type':'stage','stage':'style','status':'done','score':style_score,'report':style_report}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type':'stage','stage':'style','status':'done','score':style_score,'report':style_report}, ensure_ascii=False)}\n\n"
 
         overall = ((readability_score + (style_score or 0)) // 2) if style_score is not None else readability_score
-        try:
-            await save_writing_evaluation(
-                task_id,
-                readability_score=readability_score,
-                readability_report=readability_report,
-                style_score=style_score or 0,
-                style_report=style_report,
-                overall_score=overall,
-            )
-        except Exception as e:
-            logger.warning("保存评估结果失败: %s", e)
+        # Section-scoped evaluations are not persisted as the task's evaluation history —
+        # writing_evaluations / evaluations/latest represent the full-article evaluation only.
+        if not section_id:
+            try:
+                await save_writing_evaluation(
+                    task_id,
+                    readability_score=readability_score,
+                    readability_report=readability_report,
+                    style_score=style_score or 0,
+                    style_report=style_report,
+                    overall_score=overall,
+                )
+            except Exception as e:
+                logger.warning("保存评估结果失败: %s", e)
 
-        yield f"data: {_json.dumps({'type':'complete','overall_score':overall,'has_style':has_style_ref}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type':'complete','overall_score':overall,'has_style':has_style_ref}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1125,8 +1213,18 @@ async def get_full_content(task_id: str, user: dict = Depends(require_write_acce
     """Assemble draft/confirmed section contents into a single document."""
     await _ensure_task_owner(task_id, user["id"])
     sections = await get_writing_sections(task_id)
-    parts = [s["content"] for s in sections if s.get("content") and s.get("status") in ("draft", "confirmed")]
-    return {"content": "\n\n".join(parts), "section_count": len(parts)}
+    parts = []
+    skipped_headings = []
+    for s in sections:
+        if s.get("content") and s.get("status") in ("draft", "confirmed"):
+            parts.append(s["content"])
+        else:
+            skipped_headings.append(s["heading"])
+    return {
+        "content": "\n\n".join(parts),
+        "section_count": len(parts),
+        "skipped_headings": skipped_headings,
+    }
 
 
 @writing_router.get("/{task_id}", response_class=HTMLResponse)
