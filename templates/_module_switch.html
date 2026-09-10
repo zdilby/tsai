@@ -1,0 +1,17 @@
+{#
+  模块切换：一个向上弹出的小菜单（不依赖 Materialize Dropdown，避免在
+  position:absolute 的侧栏底部被裁切 / 错位）。切换逻辑在 base.js。
+  用法（父模板已带 can_write / can_draw / can_map 到上下文）：
+    {% set ms_current = 'map' %}{% set ms_dd_id = 'module-dd-desktop' %}
+    {% include '_module_switch.html' %}
+  ms_current ∈ {chat, writing, drawing, map}；ms_dd_id 每处唯一。
+#}
+<div class="module-switch" id="{{ ms_dd_id }}">
+  <button type="button" class="btn waves-effect waves-light module-switch-btn" style="background-color:#3f51b5;">切换模块</button>
+  <div class="module-switch-menu">
+    {% if ms_current != 'chat' %}<a href="/">对话</a>{% endif %}
+    {% if ms_current != 'writing' and can_write %}<a href="/writing/">写作</a>{% endif %}
+    {% if ms_current != 'drawing' and can_draw %}<a href="/drawing/">作图</a>{% endif %}
+    {% if ms_current != 'map' and can_map %}<a href="/map/">地图</a>{% endif %}
+  </div>
+</div>

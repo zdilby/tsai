@@ -27,6 +27,8 @@ from midware.tools import fetch_from_web
 from midware.upload import router as upload_router, upload_file
 from admin import admin_router
 from writing import writing_router
+from drawing import drawing_router
+from map import map_router
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -34,6 +36,8 @@ app.include_router(account_router, prefix="/account", tags=["account"])
 app.include_router(upload_router, prefix="/upload", tags=["upload"])
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
 app.include_router(writing_router, prefix="/writing", tags=["writing"])
+app.include_router(drawing_router, prefix="/drawing", tags=["drawing"])
+app.include_router(map_router, prefix="/map", tags=["map"])
 templates = Jinja2Templates(directory="templates")
 
 # Agent dashboard — local-only (agent_system/ is in .gitignore)
@@ -53,6 +57,10 @@ async def startup():
     await init_phase3_tables()
     from backend.db import init_writing_tables
     await init_writing_tables()
+    from backend.db import init_drawing_tables
+    await init_drawing_tables()
+    from backend.db import init_map_tables
+    await init_map_tables()
     async with database._backend._pool.acquire() as conn:
         await register_vector(conn)
 
@@ -91,6 +99,8 @@ async def index(request: Request, session_id: str = Query(None), user=Depends(ge
         "session_exists": session_ex, "user": user["username"],
         "max_file_size_mb": max_file_mb,
         "can_write": bool(user["can_write"] or user["is_admin"]),
+        "can_draw": bool(user["can_draw"] or user["is_admin"]),
+        "can_map": bool(user["can_map"] or user["is_admin"]),
     })
 
 

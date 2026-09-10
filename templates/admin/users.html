@@ -69,6 +69,16 @@
                             onclick="toggleWritingPermission({{ u.id }}, {{ '0' if u.can_write else '1' }})">
                         {% if u.can_write %}撤写作{% else %}开写作{% endif %}
                     </button>
+                    <button type="button"
+                            class="btn-small waves-effect {% if u.can_draw %}red lighten-1{% else %}green lighten-1{% endif %}"
+                            onclick="toggleDrawingPermission({{ u.id }}, {{ '0' if u.can_draw else '1' }})">
+                        {% if u.can_draw %}撤作图{% else %}开作图{% endif %}
+                    </button>
+                    <button type="button"
+                            class="btn-small waves-effect {% if u.can_map %}red lighten-1{% else %}green lighten-1{% endif %}"
+                            onclick="toggleMapPermission({{ u.id }}, {{ '0' if u.can_map else '1' }})">
+                        {% if u.can_map %}撤地图{% else %}开地图{% endif %}
+                    </button>
                     {% endif %}
                 </td>
             </tr>
@@ -277,6 +287,48 @@ async function toggleWritingPermission(userId, canWriteValue) {
                 'Content-Type': 'application/x-www-form-urlencoded',
             },
             body: new URLSearchParams({ can_write: canWriteValue }).toString()
+        });
+        if (response.ok) {
+            M.toast({html: '权限更新成功', classes: 'green darken-1'});
+            location.reload();
+        } else {
+            const errorData = await response.json();
+            M.toast({html: '权限更新失败: ' + (errorData.detail || response.statusText), classes: 'red darken-1'});
+        }
+    } catch (error) {
+        M.toast({html: '网络错误: ' + error, classes: 'red darken-1'});
+    }
+}
+
+async function toggleDrawingPermission(userId, canDrawValue) {
+    try {
+        const response = await fetch(`/admin/user/${userId}/set_draw`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({ can_draw: canDrawValue }).toString()
+        });
+        if (response.ok) {
+            M.toast({html: '权限更新成功', classes: 'green darken-1'});
+            location.reload();
+        } else {
+            const errorData = await response.json();
+            M.toast({html: '权限更新失败: ' + (errorData.detail || response.statusText), classes: 'red darken-1'});
+        }
+    } catch (error) {
+        M.toast({html: '网络错误: ' + error, classes: 'red darken-1'});
+    }
+}
+
+async function toggleMapPermission(userId, canMapValue) {
+    try {
+        const response = await fetch(`/admin/user/${userId}/set_map`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({ can_map: canMapValue }).toString()
         });
         if (response.ok) {
             M.toast({html: '权限更新成功', classes: 'green darken-1'});

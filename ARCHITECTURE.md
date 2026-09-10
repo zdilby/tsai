@@ -1,7 +1,7 @@
 # TSAI 项目架构文档
 
 > 本文档由 Claude Code 自动生成并维护，随代码变动同步更新。
-> 最后更新：2026-07-26
+> 最后更新：2026-08-21
 
 ---
 
@@ -31,20 +31,26 @@ tsai/
 ├── account.py            # 认证路由：登录、注册、改密
 ├── admin.py              # 管理员路由：用户管理、邀请码
 ├── writing.py            # 写作模块路由（writing_router，前缀 /writing/）
+├── drawing.py            # 作图模块路由（drawing_router，前缀 /drawing/）
 ├── settings.py           # 配置加载（.env）、全局 logger
 ├── backend/
 │   ├── db.py             # 全部 SQL 操作与数据库 Schema
-│   └── rag.py            # 向量检索、Embedding 生成
+│   ├── rag.py            # 向量检索、Embedding 生成
+│   └── image_gen.py      # 作图模块：调用 OpenAI 兼容 images/generations 接口
 ├── midware/
 │   ├── tools.py          # 文档解析、分块、网络搜索
 │   └── upload.py         # 文件上传与后台处理
 ├── templates/            # Jinja2 HTML 模板
 │   ├── chat.html         # 主聊天界面（sidenav + .main 双栏）
 │   ├── writing.html      # 写作模块界面（#writing-sidebar + .writing-shell 双栏，内含 1fr+300px 网格）
+│   ├── drawing.html      # 作图模块界面（#drawing-sidebar + .drawing-shell 双栏，内含 1fr+300px 网格）
 │   ├── account/          # 登录/注册页
 │   └── admin/            # 管理员后台页
 ├── static/               # CSS、JS、用户上传文件
-│   └── loads/            # 用户上传文件：loads/{username}/{session_id}/
+│   ├── loads/            # 用户上传文件：loads/{username}/{session_id}/
+│   ├── images/           # 作图模块生成图片：images/{username}/{style_id}/{generation_id}.png
+│   ├── js/drawing.js     # 作图模块前端逻辑
+│   └── css/drawing.css   # 作图模块样式
 ├── scripts/              # 运维脚本（建管理员、生成邀请码等）
 └── logs/process.log      # 应用日志
 ```
@@ -123,6 +129,27 @@ tsai/
 | `POST` | `/writing/tasks/{task_id}/evaluate` | SSE 流式质量评估 Pipeline（阅读检查 → 风格比对，串行执行，见十一.4） |
 | `GET` | `/writing/tasks/{task_id}/evaluations/latest` | 获取最近一次评估结果 |
 
+### 作图模块路由（`drawing.py`，前缀 `/drawing/`）
+
+所有路由经 `require_draw_access` 依赖校验：`is_admin` 或 `can_draw=TRUE` 才放行（校验逻辑逐字镜像写作模块的 `require_write_access`），否则 403（HTML 页面路由 302 回首页）。详见十五「作图模块」。
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| `GET` | `/drawing/` | 作图首页（自动跳转最新风格，无风格则渲染空态） |
+| `GET` | `/drawing/{style_id}` | 作图风格页面（Jinja2 HTML；路由声明在文件末尾，避免抢先匹配 `/styles`、`/prompts` 等固定路径） |
+| `POST` | `/drawing/styles` | 新建作图风格（name/prompt_ids） |
+| `GET` | `/drawing/styles` | 获取当前用户全部作图风格（侧栏列表） |
+| `GET` | `/drawing/styles/{id}` | 获取单个风格详情 |
+| `PATCH` | `/drawing/styles/{id}` | 更新风格（name/prompt_ids/skill_package_id，只发差异字段） |
+| `DELETE` | `/drawing/styles/{id}` | 删除风格（级联删除其全部生成记录，并尽力清理磁盘图片文件） |
+| `GET` | `/drawing/prompts` | 获取共享 Prompt 库（全体作图用户共用，不分用户） |
+| `POST` | `/drawing/prompts` | 新增 Prompt 条目（name + content） |
+| `DELETE` | `/drawing/prompts/{id}` | 删除 Prompt（风格里残留的引用在拼 prompt 时按 id 过滤，不做强约束） |
+| `POST` | `/drawing/styles/{id}/generate` | 核心生成接口：拼 prompt（绑 skill 包/编辑走 LLM 编译）→ 写 `status='processing'` 行 → **后台任务**调 `backend/image_gen.py` 出图 → 立即返回 `{id, status:"processing"}`（不再同步等出图） |
+| `GET` | `/drawing/generations/{id}/status` | 轮询单条生成状态：`processing` / `done`（带 `image_url`）/ `failed`（带 `error_msg`） |
+| `GET` | `/drawing/styles/{id}/generations` | 获取该风格的生成历史（画廊，最近 50 条） |
+| `DELETE` | `/drawing/generations/{id}` | 删除单条生成记录（同步删除磁盘图片文件） |
+
 ### 管理员路由（`admin.py`）
 
 | 方法 | 路径 | 功能 |
@@ -132,6 +159,7 @@ tsai/
 | `GET` | `/admin/session/{id}` | Session 详情页 |
 | `POST` | `/admin/user/{id}/set_admin` | 将指定用户提升为管理员 |
 | `POST` | `/admin/user/{id}/set_writing` | 授予/撤销该用户的写作模块访问权限（`can_write`） |
+| `POST` | `/admin/user/{id}/set_draw` | 授予/撤销该用户的作图模块访问权限（`can_draw`） |
 | `POST` | `/admin/user/{id}/max_tokens` | 设置每日 Token 配额 |
 | `POST` | `/admin/user/{id}/max_file_size` | 设置最大文件大小 |
 | `POST` | `/admin/user/{id}/reset_password` | 强制重置密码 |
@@ -156,6 +184,14 @@ messages           knowledge_base     upload_files        writing_tasks
                                                           （版本化写作内容   （TOC 分段，      （质量评估记录：
                                                            最多保留 3 版）    独立生成/状态）    阅读+风格评分）
 
+users              ← （另一条线）用户账户
+  ↓ 1:N
+drawing_styles     ← 作图风格（name + prompt_ids + skill_package_id）
+  ↓ 1:N
+drawing_generations ← 生成记录（本地磁盘 + DB 路径）
+
+drawing_prompts    ← 共享 Prompt 库（不分用户，独立表，供所有 drawing_styles 勾选引用）
+
 invite_codes       ← 邀请码（独立表）
 ```
 
@@ -167,6 +203,7 @@ username        TEXT UNIQUE NOT NULL
 password_hash   TEXT NOT NULL
 is_admin        BOOLEAN DEFAULT FALSE
 can_write       BOOLEAN NOT NULL DEFAULT FALSE  -- 写作模块访问权限（管理员在 /admin/users 授予）
+can_draw        BOOLEAN NOT NULL DEFAULT FALSE  -- 作图模块访问权限（管理员在 /admin/users 授予）
 max_daily_tokens  INTEGER DEFAULT 100000   -- 0 = 不限
 max_file_size_mb  INTEGER DEFAULT 10       -- 0 = 不限
 created_at      TIMESTAMP DEFAULT NOW()
@@ -315,6 +352,55 @@ created_at         TIMESTAMPTZ DEFAULT NOW()
 索引：`idx_writing_evaluations_task_id` on `(task_id, created_at DESC)`
 
 详见十一.4「多 Agent 质量评估 Pipeline」。
+
+### `drawing_prompts`（作图模块）
+
+共享的 Prompt 库（原名 `drawing_skills`，已合并"风格私有 prompt"与"共享 skill 片段库"两个概念，详见十五.2），不分用户，供所有 `drawing_styles` 勾选引用。
+
+```sql
+id          UUID PRIMARY KEY DEFAULT gen_random_uuid()
+name        TEXT NOT NULL
+content     TEXT NOT NULL DEFAULT ''   -- 拼入最终 prompt 的文字（原列名 snippet）
+created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL
+created_at  TIMESTAMPTZ DEFAULT NOW()
+```
+
+### `drawing_styles`（作图模块）
+
+对应作图页面侧栏每个 tab。
+
+```sql
+id                UUID PRIMARY KEY DEFAULT gen_random_uuid()
+user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
+name              TEXT NOT NULL DEFAULT '未命名风格'
+prompt_ids        JSONB NOT NULL DEFAULT '[]' -- 勾选嵌入的 drawing_prompts.id 列表（原列名 skill_ids；原有的自由文本 prompt 列已删除，并入 Prompt 库）
+skill_package_id  UUID REFERENCES drawing_skill_packages(id) ON DELETE SET NULL -- 绑定的第三方 skill 包，最多一个
+created_at        TIMESTAMPTZ DEFAULT NOW()
+updated_at        TIMESTAMPTZ DEFAULT NOW()
+```
+
+索引：`idx_drawing_styles_user_id` on `user_id`
+
+### `drawing_generations`（作图模块）
+
+每次生成记录，图片走本地磁盘存储、DB 记录相对路径（与 `upload_files` 的 `static/loads/...` 约定一致）。
+
+```sql
+id           UUID PRIMARY KEY DEFAULT gen_random_uuid()
+style_id     UUID NOT NULL REFERENCES drawing_styles(id) ON DELETE CASCADE
+user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
+user_input   TEXT NOT NULL DEFAULT ''   -- 用户本次输入的文字
+full_prompt  TEXT NOT NULL DEFAULT ''   -- 风格prompt + 勾选skill片段 + user_input 拼接后实际发送的内容
+image_path   TEXT DEFAULT ''            -- static/images/{username}/{style_id}/{id}.png
+model        TEXT DEFAULT ''
+status       TEXT NOT NULL DEFAULT 'pending'  -- pending | done | failed
+error_msg    TEXT DEFAULT ''
+created_at   TIMESTAMPTZ DEFAULT NOW()
+```
+
+索引：`idx_drawing_generations_style_id` on `(style_id, created_at DESC)`
+
+删除风格或删除单条生成记录时，路由层（`drawing.py`）会在 DB 行删除后尽力同步删除磁盘上的图片文件（`_delete_image_file`，失败仅记 warning，不中断请求）。详见十五「作图模块」。
 
 ### `prompt_versions`（Phase 3a）
 
@@ -580,9 +666,11 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `AGENT_C_MIN_TRACES` | `5` | Phase 3d 每个版本至少这么多 trace 才比较 |
 | `HTTP_PROXY` | — | 可选 HTTP 代理 |
 | `ANTHROPIC_API_KEY` | — | Claude API 密钥（仅 `agent_system/` 子系统使用） |
-| `CODEX_API_KEY` | — | 写作模块 Markdown 排版首选后端（OpenAI 兼容端点密钥）；未配置则直接跳过，回退 Gemini |
-| `CODEX_BASE_URL` | — | Codex 兼容端点 base URL |
+| `CODEX_API_KEY` | — | 写作模块 Markdown 排版首选后端 + 作图模块图像生成共用（OpenAI 兼容端点密钥）；写作场景未配置则直接跳过，回退 Gemini |
+| `CODEX_BASE_URL` | — | Codex 兼容端点 base URL（写作排版 `/chat/completions`、作图模块 `/images/generations` 共用同一中转） |
 | `CODEX_MODEL` | `gpt-4o` | Codex 排版调用的模型名 |
+| `CODEX_IMAGE_MODEL` | `gpt-image-1` | 作图模块生成调用的模型名（与 `CODEX_MODEL` 独立配置；中转可能静默替换为其他底层模型，见十五） |
+| `CODEX_IMAGE_TIMEOUT` | `300` | 作图 images/generations、images/edits 调用的 httpx read 超时（秒）。中转出图慢，生产的 gunicorn `--timeout` / Nginx `proxy_read_timeout` 需 ≥ 此值，见 `PRODUCTION.md` |
 
 > `agent_system/llm.py` 在导入时自动加载项目根 `.env`（通过 `python-dotenv`），与 `settings.py` 的 Pydantic Settings 加载模式一致。
 
@@ -1385,3 +1473,266 @@ Phase 1（full-context 路径）和 Phase 2 第 1 步（Agent ReAct 循环）已
 | 思路 6 | 答案验证 & 引用 grounding（拆 claim 反查）| 用户反馈幻觉问题严重时 |
 
 这些方向都是**当 Phase 3 自主调优系统跑稳后**，根据观察到的真实失败模式来选择性引入的。**不要为了上而上**。
+
+---
+
+## 十五、作图模块（`drawing.py` + `templates/drawing.html`）
+
+### 概述
+
+作图模块是与对话、写作并列的第三个板块：左侧栏按「作图风格」分 tab（每个风格是一条可新建/编辑/删除的记录，可从共享的 Prompt 库勾选任意多条拼入最终 prompt），右侧是作图工作区——输入文字，用当前风格调用 `gpt-image-1`（经 CODEX 中转）生成图片，历史生成结果以画廊形式展示。**访问受 `users.can_draw` 权限门控**：仅 `is_admin` 或 `can_draw=TRUE` 的用户可用（`require_draw_access` 依赖，逐字镜像写作模块的 `require_write_access`），管理员在 `/admin/users` 逐用户授予（`POST /admin/user/{id}/set_draw`）。
+
+设计上以写作模块为直接模板（同为独立板块、同样是"侧栏列表 + 右侧工作区"结构），复用其路由注册、权限校验、DB 初始化、文件存储等约定。两处刻意偏差：JS/CSS 放在独立的 `static/js/drawing.js` / `static/css/drawing.css`，而不是像 `writing.html` 那样把上千行样式和脚本内联进模板；生成接口不用 SSE（图像生成没有可展示的逐字流式中间态），走一次性 JSON 请求/响应，前端显示 loading 占位即可。
+
+### 图像生成后端：`backend/image_gen.py`
+
+复用写作模块已在用的 `CODEX_API_KEY`/`CODEX_BASE_URL`（第三方 OpenAI 兼容中转，`https://gpt.hinature.cn/v1`），新增独立的 `CODEX_IMAGE_MODEL`（默认 `gpt-image-1`）配置项，与写作排版用的 `CODEX_MODEL=gpt-5.5` 互不影响。
+
+```python
+async def generate_image(prompt: str, *, size: str = "1024x1024") -> bytes:
+    # POST {CODEX_BASE_URL}/images/generations
+    # 解析 {"data": [{"b64_json": ...}]}（OpenAI 标准形状）→ base64 解码 → 返回 PNG bytes
+```
+
+用原生 `httpx.AsyncClient`（不像 `writing.py:_codex_format_sync` 那样借用 `asyncio.to_thread` 包同步调用），配置统一走 `settings.py`（不像 `_codex_format_sync` 那样绕开 settings 直接 `os.getenv`）。
+
+**已验证**：中转端点确实代理了 `images/generations`，返回体是标准 OpenAI 形状 `{"data":[{"b64_json","revised_prompt"}], "model", ...}`。**已知怪癖**：请求 `model="gpt-image-1"` 时，中转返回的 `model` 字段实测为 `"gpt-image-2-codex"`——中转会静默替换成其他底层模型，不影响调用方式和响应形状，但如果未来该中转下线 `gpt-image-1` 映射导致报错，需要现场调整或切换到官方 `api.openai.com`（届时只需新增 `OPENAI_IMAGE_API_KEY`/`OPENAI_IMAGE_BASE_URL` 并切换 `image_gen.py` 里读取的配置字段，调用与解析逻辑不变）。
+
+### 核心生成流程（`POST /drawing/styles/{id}/generate`）
+
+```
+1. 校验风格归属（_ensure_style_owner）
+2. 按 style.prompt_ids 从 drawing_prompts 取出已勾选条目的 content（过滤已删除的 id），拼成 style_context
+3. 拼接 full_prompt = style_context + "\n\n" + user_input（绑 skill 包 / 编辑场景走 LLM 编译，见十五.4）
+4. create_drawing_generation() 插入行 → 立即 update 为 status='processing'
+5. background_tasks.add_task(_run_generation_job, ...)：接口**立即返回** {"id","status":"processing","full_prompt","compile_degraded"}
+6. 后台 _run_generation_job：
+   ├── await image_gen.edit_image(...) 或 generate_image(...)（出图经第三方中转，常见 1-3 分钟）
+   ├── 成功：写入 static/images/{username}/{style_id}/{generation_id}.png（DB 存相对路径），
+   │        update_drawing_generation_result(status='done', image_path=..., model=...)
+   └── 失败：update_drawing_generation_result(status='failed', error_msg=<面向用户的中文说明>)
+7. 前端拿到 processing 后，每 3s 轮询 GET /drawing/generations/{id}/status 直到 done/failed
+   （最多轮询 12 分钟；切走页面再回来，loadGallery 按 processing 记录自动续上轮询）
+```
+
+> **为什么改成后台任务 + 轮询**：`gpt-image-1` 经中转出图要 1-3 分钟、偶尔更久，同步 HTTP 请求会被生产的 gunicorn（默认 `--timeout 30`）/ Nginx 杀掉返回 502。改成"提交即返回 + `generation_id` 轮询"后，长耗时挪到 `BackgroundTasks` 里，不占 HTTP 连接；`backend/image_gen.py` 的 httpx read 超时由 `.env` 的 `CODEX_IMAGE_TIMEOUT`（默认 300s）控制。**代价**：后台任务在进程内跑，部署/重启会丢，残留 `processing` 需手动清（见 `PRODUCTION.md`）。
+>
+> **错误分类**：`ImageGenError` 带 `kind` 字段（`config`/`upstream`/`timeout`/`network`/`auth`/`bad_request`/`decode`）。中转或其上游返回 4xx/5xx（如整体故障时的 `404 Upstream request failed`）→ `kind='upstream'`，`error_msg` 明确写"第三方图像服务暂时不可用…这不是本站的问题…请反馈给中转服务提供商"，前端 toast + 失败占位卡都展示这条。
+
+> **实现时踩过的坑**：`drawing_prompts.id`/`drawing_styles.id` 是 `UUID` 列，asyncpg 读出来是 `uuid.UUID` 对象；而 `drawing_styles.prompt_ids`（jsonb 数组）里存的是字符串。用 `{p["id"]: p for p in prompts}` 直接建字典再拿字符串 id 去查会**静默查不到**（`pid in all_prompts` 恒为 False，不报错，只是这条 Prompt 悄悄没被拼进最终 prompt）。修复：建字典时 `str(p["id"])` 统一转字符串。
+
+> **路由注册顺序踩过的坑**：`GET /{style_id}` 这类单段通配路由必须放在文件**最后**声明。FastAPI/Starlette 按注册顺序匹配路由，若 `/{style_id}` 声明在 `/prompts`、`/styles` 等固定路径之前，会抢先把 `GET /drawing/prompts` 当成 `style_id="prompts"` 处理，实测直接导致 asyncpg UUID 解析报错、请求 500。`writing.py` 的 `/{task_id}` 页面路由本就声明在文件末尾，这是同一个坑的既有解法，作图模块照做即可。
+
+### Prompt 库
+
+早期版本里"风格自己的一段 prompt 文本"和"共享的 skill 规则片段库"是两套概念（`drawing_styles.prompt` 自由文本 + `drawing_skills`/`skill_ids` 共享片段），但两者在生成时的效果完全一样——都只是原样拼进最终 `full_prompt`，没有优先级或语义差异，纯属"私有一段 vs. 共享片段库"的组织方式不同，容易混淆。已合并为统一的 **Prompt 库**（`drawing_prompts` 表，原 `drawing_skills` 改名，`snippet` 列改名为 `content`；`drawing_styles.skill_ids` 改名为 `prompt_ids`，原 `drawing_styles.prompt` 自由文本列整列删除）：不分用户的共享表，所有有作图权限的用户共同维护、共同复用，一个风格可以勾选任意多条（0~N），自动拼入最终 prompt（见上文流程第 2-3 步）。删除一条 Prompt 不会强制解除各风格的引用，只是拼 prompt 时按当前存在的 id 过滤，行为上是"悄悄失效"而非报错。新建风格时不预选任何 Prompt，勾选统一放到创建后的设置面板里做。
+
+### 前端（`templates/drawing.html` + `static/js/drawing.js` + `static/css/drawing.css`）
+
+结构镜像写作模块：`#drawing-sidebar`（桌面常驻风格列表，`flex:0 0 260px`）+ `.drawing-shell`（`nav` + `.drawing-layout` grid `1fr 300px`）。响应式断点与写作模块相同（`≥993px` 桌面栏可见 / `≤992px` 收起变单列）。
+
+| 区域 | ID | 内容 |
+|---|---|---|
+| 左侧风格列表 | `#drawing-sidebar` | 风格列表 + 新建风格 / 进入对话 / 进入写作按钮 |
+| 主区 | `#drawing-main` | `#generation-gallery`（历史链列表，见十五.4） + `#prompt-input-box`（底部固定文字输入 + 生成按钮） |
+| 右侧设置 | `#drawing-settings` | 风格名称 / Prompt 库勾选列表 + 管理入口 / 绑定 Skill 包下拉 + 管理入口 / 保存设置按钮 |
+
+**交互模式**：侧栏切换风格 = 整页跳转 `/drawing/{style_id}`（镜像写作模块的既有模式，服务端渲染注入 `styleId`），不引入 SPA 状态管理。风格/图片数据通过 `<script id="drawing-init-data" type="application/json">` 注入初始 `styleId`，`drawing.js` 首帧读取后发起后续 fetch。
+
+「生成」按钮提交时短暂显示 loading 态（提交很快返回），随后画廊里出现一张 **processing 占位卡**（spinner + "出图中…可能需要 1-3 分钟，可离开本页面稍后回来查看"）；`drawing.js` 用 `activePolls` Map 管理每条生成的 3s 轮询，`loadGallery()` 每次重渲染后会按 `status==='processing'` 的记录自动 `startPolling`（切走再回来也能续上），完成/失败后再整块重渲染。失败卡展示 `error_msg` + 删除按钮。进度提示只出现在对应生成所在行的占位卡里，不在输入框附近放常驻说明。完成后整块重新拉取画廊数据渲染（`loadGallery()`），不做增量 DOM patch。点击历史步骤缩略图弹出 lightbox 展示原图 + 实际发送的 prompt 文本，便于核对。
+
+`chat.html`、`writing.html` 侧栏底部各加一条 `{% if can_draw %}` 包裹的「进入作图」入口；`drawing.html` 侧栏同样加了 `{% if can_write %}` 包裹的「进入写作」入口，三个板块可互相跳转。
+
+### 十五.4 图片迭代编辑（历史链）
+
+**目的**：作图不是一次性生成就完事——用户经常需要针对已生成的图片连续追加修改（"加一只凤凰"→"再让光线暖一点"），且要能看到每一步改了什么、能单独撤销某一步而不影响其余历史。
+
+**数据模型**：`drawing_generations` 新增自引用外键 `parent_generation_id UUID REFERENCES drawing_generations(id) ON DELETE CASCADE`（可空）。`parent_generation_id IS NULL` = 一条编辑历史链的根（最初创作）；非空 = 对某个节点的一次编辑。正常使用下每条链是线性的，但表结构本身不限制分叉（没有为分叉做任何特殊设计，纯粹是"允许多个子节点"这个约束的自然结果）。
+
+**画廊 = 折叠的历史链列表**：`#generation-gallery` 从网格缩略图改成竖直列表，每一行对应一条链的**当前最新一步（叶子节点）**，不是每一次生成都单独占一行。取"叶子节点"的查询是 `NOT EXISTS (SELECT 1 FROM drawing_generations c WHERE c.parent_generation_id = g.id)`（`backend/db.py:get_drawing_generation_tips`）。折叠态：左缩略图 + 右侧该行最近一次输入文字。点击整行原地展开，用 `WITH RECURSIVE` 沿 `parent_generation_id` 回溯到根、按时间正序返回整条链（`get_drawing_generation_lineage`），渲染成纵向步骤列表。**同一时刻只允许一行展开**——`static/js/drawing.js` 里的 `expandedGenerationId` 单例变量逐字镜像 `writing.html` 分段写作的 `expandedSectionId` 模式（见十一.4）。没有任何行展开时，底部输入框行为是"新建一条链"（`POST /generate` 不带 `parent_generation_id`）；有行展开时，输入框目标切换为"基于这条链最新一步继续编辑"（带上 `parent_generation_id`），成功后自动把展开目标指向新产出的这一步，不需要用户重新点选就能连续追加指令。
+
+**编辑调用**：`backend/image_gen.py` 新增 `edit_image(image_bytes, prompt) -> bytes`，POST 到 `{CODEX_BASE_URL}/images/edits`（multipart：`image` 文件 + `prompt` + `model`），响应形状与 `images/generations` 一致，已用真实请求验证可用。
+
+**编辑指令不是简单字符串拼接**：`drawing.py:_compose_edit_instruction()` 用项目已有的 Gemini `client` 做一次非流式调用，把「风格设定 + 链的根节点 prompt（最初创作意图）+ 父节点 prompt（上一轮编辑指令）+ 用户本次新指令」合成为一条单一、清晰、可直接执行的编辑指令，再连同**父节点产出的图片文件**一起传给 `edit_image()`。图片本身的最新视觉状态才是编辑最重要的输入（模型直接"看得到"当前长什么样），文字合成只是为了避免多轮编辑后指令上下文丢失导致风格漂移。Gemini 调用失败时静默回退成用户原始输入（`except Exception` 兜底，不阻断生成流程）。
+
+**删除的两种语义**：
+- `DELETE /drawing/generations/{id}/step`（`delete_drawing_generation_step`）——单步删除，在 `database.transaction()` 里先把待删节点的子节点接到它的父节点上（"拼接"），再删除该节点本身；链上其余步骤不受影响。若待删节点既无父也无子（链上唯一一步），这个操作自然退化成删掉整条链，不需要特殊分支。用在展开视图里每一步的删除按钮。
+- `DELETE /drawing/generations/{id}`（`delete_drawing_generation_lineage`）——整条链删除，走 `WITH RECURSIVE` 定位到根节点后删除，`ON DELETE CASCADE` 级联清空所有子孙。用在折叠行的删除按钮，前端会先 `confirm('删除这张图片将同时删除其全部创作历史，确定继续？')`。**注意**：该函数区分"链不存在返回 `None`"和"链存在但没有任何图片文件返回 `[]`"两种情况（供路由层正确返回 404 而不是误判成功），不要简单用 `if not result` 判断。
+
+> **实现时踩过的坑（同一类 UUID/str 比较问题的第三次出现）**：`generate()` 路由里校验"待编辑的图片是否属于当前风格"时写成 `parent["style_id"] != style_id`——`parent["style_id"]` 是 asyncpg 返回的 `uuid.UUID` 对象，`style_id` 是来自 URL 路径的字符串，两者永远不相等，导致合法编辑请求 100% 报 404。修复：`str(parent["style_id"]) != style_id`。这是本模块第三次踩到"UUID 列在 Python 里比较/查字典前忘记转字符串"的坑（前两次见十五.2 的 skill_ids 查找），以后任何 `asyncpg` 返回的 UUID 列要跟外部传入的字符串做比较/查字典，一律先 `str()`。
+
+**验证**：真实调用过完整链路——新建风格→首次生成→连续编辑两次（第二次编辑不重新指定 `parent_generation_id`，验证"继续编辑"体验）→确认 `get_drawing_generation_tips` 只返回最新一步、`get_drawing_generation_lineage` 按顺序返回三步→删除中间步骤确认前后节点正确拼接、磁盘文件同步删除→删除整条链确认级联清空、DB 行清零、重复删除返回 404。
+
+### 十五.5 绑定第三方 Skill 包（档位 A：指令包型）
+
+**背景**：Prompt 库（十五.2）只能拼几句零散规则，不足以承载真正意义上的第三方"skill"——例如 `SKILL.md` + `references/*.md` 这种完整方法论文档（固定规则、可变规则、prompt 编译模板、禁止项），本质是给 agent 读的指令包，不是一段静态 prompt。本节新增的机制让一个"风格"可以绑定这样一整套方法论，生成时用它来**编译**最终 prompt，而不是简单字符串拼接。
+
+只实现了"指令包型"（`kind='instruction'`，纯靠现有 Gemini client 做 LLM 编排，不涉及外部工具调用）。预留了 `kind='mcp'` 和 `mcp_config JSONB` 字段给"真正连接第三方 MCP server"的档位 B，但本期未实现——调研的两个真实 skill 仓库（`gc-minimal-zine-poster`、`photo-abstract-editorial`）均不依赖 MCP，纯粹是"读文档 → LLM 编译出最终 image-gen prompt"模式，档位 A 已经够用；档位 B 涉及运行不受信任的第三方代码，安全和工程成本显著更高，暂无真实需求，值得单独立项。
+
+**数据模型**：`drawing_skill_packages` 表（不分用户，全体作图用户共享，镜像 Prompt 库的共享约定）存一份 skill 全文快照（`instructions` 字段），`drawing_styles.skill_package_id`（外键，`ON DELETE SET NULL`）指向最多一个包——单值外键天然保证"最多绑一个"，不需要额外校验。**与 Prompt 库（`prompt_ids`）并存、语义不同**：`prompt_ids` 是零散的、自己攒的 Prompt 条目，`skill_package_id` 是完整第三方方法论，风格设置里两者可以同时配置，互不冲突（勾选的 Prompt 内容拼成 `style_context`，作为"补充要求"传给编译层，见下文）。
+
+**Skill 全文录入是"抓取预览 → 人工确认 → 保存"两段式**（`_fetch_skill_package_from_github`，`drawing.py`）：从 `repo_url` 解析 `owner/repo` → GitHub API 取默认分支 → 拉取 `SKILL.md` + `references/` 目录下所有 `.md` 文件 → 按 `# SKILL.md\n{...}\n\n# references/xxx.md\n{...}` 拼接成一段文本**返回给前端预览**，不直接落库；用户在文本框里可编辑后再点"保存"才真正写入 `drawing_skill_packages`。这样存的是仓库某一时刻的快照，不依赖第三方仓库长期存活，也给用户一个保存前检查/精简内容的机会。删除一个包，绑定它的风格通过 `ON DELETE SET NULL` 自动解绑，不报错。
+
+**勾选的 Prompt 库内容与绑定的 skill 不是二选一，而是都作为上下文喂给同一次 LLM 编译调用**（`_compile_with_skill_package`，`drawing.py`，紧挨着既有的 `_compose_edit_instruction`，是同一设计模式的推广）：
+
+```python
+async def _compile_with_skill_package(
+    *, skill_instructions: str, style_context: str,
+    user_input: str, base_image_bytes: bytes | None = None,
+    initial_prompt: str = "", previous_prompt: str = "",
+) -> tuple[str, bool]:
+    # parts = [skill_instructions 全文（要求"严格遵循其中的规则、术语和结构"）,
+    #          style_context（风格勾选的 Prompt 库条目拼接，"补充要求，在不违反 skill 规则的前提下尽量满足"）,
+    #          initial_prompt / previous_prompt（编辑场景的历史上下文，同 _compose_edit_instruction）,
+    #          user_input（本次创作/修改要求）]
+    # 有 base_image_bytes 则用 gtypes.Part.from_bytes(data=..., mime_type="image/png") 把图片一起传给
+    # client.aio.models.generate_content —— 走 vision 输入（编辑场景，模型能"看到"当前图片状态）
+    # 编译失败或返回空文本，回退为 style_context + user_input 直接拼接，不阻断生成流程；
+    # 返回值第二项 degraded=True 标记这次发生了回退，调用方把它透传给前端提示用户
+```
+
+skill 全文是"必须遵循的规则"，`style_context` 是"在不违反 skill 规则前提下尽量满足的补充要求"——两者不冲突，因为决定权交给 LLM 在同一次调用里权衡，而不是代码层面做规则合并/覆盖。这也是为什么"有的 skill 本身就要求必须有输入照片"（如 `photo-abstract-editorial`）不需要代码特殊处理：绑定到纯文本生成场景时编译质量取决于 skill 内容本身对无图情况的适应性，属于 skill 设计的局限，不是编排层的 bug。
+
+**编译降级的可见性**：`_compile_with_skill_package` 和 `_compose_edit_instruction`（十五.4）都会调用 Gemini 做一次 LLM 合成，两者都有"调用失败或返回空文本就静默回退成直接拼接"的兜底逻辑——这个设计本身没问题（保证 Gemini 抖动时生成流程不被卡死），但曾经完全没有对外暴露：用户看到的是"生成成功、图也出来了"，实际上风格/skill 规则根本没生效，只有翻服务端日志（`skill 编译失败，回退为...`）才能发现。真实踩过一次：Gemini 返回 `503 UNAVAILABLE`，某次"照片抽象" skill 编辑请求静默退化成直接把用户输入当 prompt，图片正常生成但完全没有 skill 效果。修复：两个函数都改成返回 `(prompt, degraded: bool)` 元组，`generate()` 路由把 `degraded` 存进响应体的 `compile_degraded` 字段，前端 `runGenerate()` 收到 `compile_degraded: true` 时弹出橙色提示"本次未成功应用风格/Skill 规则……可重新生成一次"，让用户当场就能发现要不要重试，不用等到看着不对劲再回头查日志。
+
+**`generate()` 路由的分支逻辑**（`drawing.py`）：先统一算出编辑相关的上下文（`base_image_bytes`/`initial_prompt`/`previous_prompt`，无论是否绑定 skill 都要算，因为编辑场景在两条路径下都要用到父节点图片和历史 prompt），再判断 `style.skill_package_id` 是否有值：
+
+```
+若 style.skill_package_id：
+    full_prompt = await _compile_with_skill_package(...)   # 统一走 LLM 编译，无论新建还是编辑
+否则（现状完全不变，一行代码路径都不变）：
+    若是编辑 → full_prompt = await _compose_edit_instruction(...)
+    若是新建 → full_prompt = style_context + "\n\n" + user_input
+```
+
+不绑定 skill 的现有风格行为和之前完全一致；绑定后无论首次生成还是后续编辑都统一走 skill 编译。**历史链、展开/收起、单步删除、整链删除、上传按钮全都不用改**——它们操作的是生成结果那一层，不关心 prompt 怎么来的。
+
+**PATCH 语义踩过的坑**：`UpdateStyleRequest` 用 `payload.dict(exclude_none=True)` 过滤未提供字段，这意味着永远没法把 `skill_package_id` 显式 PATCH 回 `null`（会被 `exclude_none` 吞掉，等同于"不改动"）。解决：前端解绑时显式发送空字符串 `""`（不是 `null`），路由层收到 `""` 时转成 `None` 再写库——有值=绑定，`""`=解绑，字段整体缺失=不改动，三种状态互不冲突。这是本项目第二次用这个"空字符串当显式清空信号"的约定（第一次是写作模块的类似字段）。
+
+**已验证**（全部端到端跑通，非仅编译层）：真实抓取 `https://github.com/LiamGvchi/gc-minimal-zine-poster`（`SKILL.md` + 5 个 `references/*.md`，共 31869 字符）走通"抓取预览→保存"；绑定后首次生成（纯文本，无输入图片），`full_prompt` 是正确融合 skill 规则的四段式 prompt（而非原始输入直接透传），实际生成出图片文件并落盘；对同一张图做绑定 skill 的编辑（走 `base_image_bytes` / `gtypes.Part.from_bytes` vision 输入分支），`full_prompt` 正确体现"调暖光线"的编辑意图且延续了 skill 的版式规则，同样实际生成出图片文件并落盘；PATCH `skill_package_id=""` 解绑后再次生成，`full_prompt` 变回未经 LLM 编译的直接拼接（验证了解绑回退）；浏览器里确认设置面板下拉框正确回显已绑定的包、管理弹窗正确展示已有包列表和新增表单。开发环境里 CODEX 图片生成中转偶发连接超时（`generate_image`/`edit_image` 请求本身没变化，属于中转网络层的间歇性问题，不是本功能代码缺陷），生产环境如遇到同类超时，属于已知的外部依赖不稳定性，不代表编排逻辑有误。
+
+Prompt 库与 `style.prompt` 合并为统一概念后（见十五.2），`_compile_with_skill_package` 的 `style_context` 单参数版本已重新端到端验证：绑定 2 条 Prompt 库条目 + 不绑 skill 包生成，`full_prompt` 正确等于两条 Prompt 内容拼接 + 用户输入；删除其中一条已勾选的 Prompt 后再次生成，被删条目正确从 `full_prompt` 中静默消失（不报错）；同一风格改绑 skill 包后生成，LLM 编译结果里正确体现了剩余那条 Prompt 的规则内容（例如"四角留白"被编译进最终 prompt 里"四角留空"的具体描述），三种场景均实际生成出图片文件。
+
+---
+
+## 十六、地图模块（`map.py` + `templates/map.html`）
+
+### 概述
+
+与「对话 / 写作 / 作图」并列的第四个模块，参考 [MapStage](https://github.com/hopechen067/MapStage) 及其 Demo（`https://hopechen067.github.io/MapStage/`）。做到 Demo 的「看图 / 调参 / 存预设」程度，**外加** TSAI 自研的**点 / 线 / 名称标注编辑器**。**不含** HyperFrames → MP4。
+
+- **访问受 `users.can_map` 门控**：`is_admin` 或 `can_map=TRUE`（`map.py:require_map_access`，逐字镜像 `drawing.py:require_draw_access`；HTML 页面路由无权限 302 回首页，API 403；`_PAGE_ENDPOINTS = {"map_page","map_document_page"}`）。管理员在 `/admin/users` 逐用户授予（「开地图 / 撤地图」按钮 → `POST /admin/user/{id}/set_map`）。
+- **一张地图 = `map_documents` 一行**，`preset`（JSONB）= `{ version:3, style:{…}, annotations:{points,links} }`。`preset` 实时防抖 PATCH **原地更新**。
+- **零 AI / LLM 调用。** 唯一的服务端第三方出站是 `GET /map/geocode`（地名搜索代理到 OpenStreetMap Nominatim，因为 Nominatim 使用政策要求可标识的 User-Agent，浏览器 `fetch` 设不了）。瓦片 / DEM / 矢量 / 字体仍全部由**用户浏览器直连**第三方，不经服务器、无 API key（见「第三方依赖」）。
+- **设计文档**：`MAP-MODULE-DESIGN.md`（含逐条决策与备选）。
+
+### API 路由（`map.py`，前缀 `/map/`）
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| `GET` | `/map/` | 首页：有地图则 302 到最新一张，无则空态 |
+| `GET` | `/map/tile-config` | 把瓦片端点 + 署名下发给前端（唯一配置类接口，`settings.MAP_TILE_CONFIG`） |
+| `GET` | `/map/geocode?q=` | 地名搜索：代理到 Nominatim（`_GEOCODE_UA` 标识本应用），返回 `{results:[{name,short,lat,lng,type,category}]}`，最多 8 条；上游失败抛 502 + 友好文案。**唯一的服务端第三方出站接口。** |
+| `POST` | `/map/documents` | 新建地图（用 `map.py:DEFAULT_PRESET`） |
+| `GET` | `/map/documents` | 当前用户地图列表 |
+| `GET` | `/map/documents/{id}` | 单张地图完整信息（含 `preset`，JSONB 已 `json.loads`） |
+| `PATCH` | `/map/documents/{id}` | 实时保存 `{name?, preset?}`（防抖，只发差异；原地更新，**不入版本表**） |
+| `DELETE` | `/map/documents/{id}` | 删除（含尽力删缩略图） |
+| `GET` | `/map/documents/{id}/versions` | 版本列表 |
+| `POST` | `/map/documents/{id}/versions` | 存一个快照（`note` ∈ `open-diff` / `checkpoint` / `manual`），超 3 版删最旧 |
+| `POST` | `/map/documents/{id}/versions/{version}/restore` | 回滚：把该版 `preset` 拷回 `map_documents.preset` |
+| `POST` | `/map/documents/{id}/thumb` | 可选：前端 `canvas.toDataURL()` → `static/maps/{username}/{id}.png` |
+| `GET` | `/map/{map_id}` | 地图页（Jinja2 HTML；**声明在文件末尾**，避免抢先匹配 `/documents`、`/tile-config`，同 `drawing.py:/{style_id}` 的坑） |
+
+### 数据库
+
+`backend/db.py:init_map_tables()`（startup 幂等调用）：
+
+```sql
+users.can_map BOOLEAN NOT NULL DEFAULT FALSE
+
+map_documents(id UUID PK, user_id INT→users ON DELETE CASCADE, name TEXT,
+              preset JSONB, thumb_path TEXT, created_at, updated_at)   -- idx: user_id
+
+map_preset_versions(id SERIAL PK, map_id UUID→map_documents ON DELETE CASCADE,
+                    preset JSONB, version INT, note TEXT, created_at)  -- idx: (map_id, version DESC)
+```
+
+DB 函数（`backend/db.py`，全部照 `drawing_*` / `writing_contents` 抄）：`create_map_document / get_map_documents / get_map_document / map_document_owned_by / update_map_document / delete_map_document / set_map_thumb / list_map_versions / get_map_version / snapshot_map_version / latest_map_version_preset / update_user_map_permission`（`_MAP_VERSIONS_KEEP=3`，`snapshot_map_version` 插入后删多余版本）。JSONB 列 asyncpg 读出是 `str`，`get_map_document` / `get_map_version` 里 `json.loads`。`get_all_users_with_stats` 的 SELECT 已带 `u.can_map`（供 `/admin/users` 用）。
+
+### `preset` 结构（version 3）
+
+样式（Tab A）+ 标注（Tab B）同存一个 JSON，一次快照 / 回滚覆盖两者。与 MapStage preset schema 在 `style` 部分同构 → 在 MapStage Demo 里调好的「复制 JSON」可直接粘进 TSAI（「粘贴 JSON」按钮，只吸收 `style`；`annotations` 有则一并）。
+
+- `style.view` `"map" | "globe"`；`style.camera`（`center / zoom / pitch / bearing`，**默认 `pitch: 0`**，实时随 `moveend` 回写但**不计入快照变更**，见「版本历史」）；`style.basemap`（`satellite / relief / isolate / isolateRegion` 开关汇总）
+- `style.admin`：`{enabled, boundary, place, road}` —— 行政区划图层组的主开关 + 3 个子开关（边界 / 地名 / 道路），数据来自 `openmaptiles` 矢量瓦片的 `boundary` / `place` / `transportation` source-layer
+- `style.mapstage`（`backgroundColor / terrainExaggeration / satellite / hillshade / water`）
+- `style.css`（sepia/saturate/contrast/brightness/hueRotate/warmTint*/vignetteStrength/`enabled`，作为 DOM 滤镜叠层加在 `.maplibregl-canvas` 上，**不在 MapLibre paint 里、也不加在容器上**——加容器会栅格化 marker 子树，缩放时 marker 抖动）
+- `annotations.points[]`：`{id,name,lng,lat,tier,shape,size,markerColor,label{…}}`
+  - `label` 是 badge 结构：`{show, fontSize, color, box:{show,bg,border,padX,padY}, prefix:{type,icon,text,bg,fg,fontSize}}`，`prefix.type` ∈ `none / icon / text`（`icon` 从 `PREFIX_ICONS` 内联 SVG 取），参考 `static/images/map_demo.png` 的地名徽标样式；旧的 `label{show,color}` 与 `callout{…}` 字段已废弃，`ensureLabel()` 打开时自动迁移
+  - `tier` ∈ `capital / commandery / city / pass / station / custom`
+- `annotations.links[]`：`{id,from,to,directed,color,width,dash,curve,bend,name,label{…}}`
+  - **连线与点位完全解耦**：`from` / `to` 是**独立的 `[lng,lat]` 坐标对**（连线时从两端点复制一次坐标，之后互不影响）；`migrateLinks()` 把旧的「点位 id 字符串」自动迁移成坐标对
+  - `curve` ∈ `straight / arc`（旧值 `geodesic` → `arc`）；`arc` 时 `bend`（可正负，0 = 直线）控制二次贝塞尔弧度，`arcCoords()` 前端插值
+  - `color` 默认 `#000000`（黑色）
+  - `name`：连线自己的名称，`ensureLink()` 首次补默认值（当前起终点的经纬度格式，`fmtLL(from) + " ⇢ " + fmtLL(to)`），之后完全独立、可编辑，不随拖动端点自动重算；列表 / 组成员行都显示 `name` 而非坐标
+  - `label`（连线名称标注，`ensureLinkLabel()` 归一化）：`{show, fontSize, color, angle}`，默认 `show:false`；`angle` 默认取当前 `bearingDeg(from,to)` 四舍五入，之后独立可调（配合走势，同样不随端点拖动自动重算，面板有「对齐连线方向」按钮可手动重新对齐）
+- `annotations.groups[]`：`{id,name,members:[点/线 id 混装],props:{markerColor,labelColor,boxBg,boxBorder,nameFontSize,prefixBg,prefixFg,prefixFontSize,linkColor,linkWidth,linkCurve,arrowStyle,arrowSize}}`（`arrowStyle`/`arrowSize` 对组内所有连线生效，与连线是否勾了「有向」无关——字段本身一直存在，只是不有向时不显示箭头）
+  - **一个点/线只能属于一个组**（`moveToGroup()` 保证的不变量，见前端「列表」一节）
+- `annotations.order[]`：顶层列表顺序，元素是「组 id」或「未分组的点/线 id」；已进组的点/线不出现在这里，顺序改由所在组的 `members` 决定。`ensureOrder()` 有自愈能力（见前端一节），旧 preset 没有这个字段会自动从现有 points/links/groups 推导补齐
+
+
+  - **组 = 统一修改，不是样式叠层。** 调组里任一控件 → `setGroupProp()` 立刻把该值**写进组内每个成员自己的字段**（`GROUP_POINT_APPLY` 写点、`GROUP_LINK_APPLY` 写线），渲染时不做任何叠加 / 继承。单独改某个点 / 线照常生效，会让 `group.props` 变「过时」——这是允许的，两者无优先级。
+  - `group.props` 只在打开组面板时用于回显和「应用到全部成员」（`applyAllGroupProps()`），**永不在加载时自动重放**（否则组就成了有优先级的样式层）。`groupDivergence()` 检测「成员当前值 ≠ 组设定值」并在面板里提示可「拉齐」。
+  - 删点 / 删线时 `pruneGroupMember()` 清理各组的 `members`；`ensureGroups()` 在 `bootMap()` 里补默认值，旧 preset 无 `groups` 字段自动补 `[]`。
+
+### 前端（`templates/map.html` + `static/css/map.css` + `static/js/map.js`）
+
+镜像 `drawing.html` 布局：`#map-sidebar`（地图列表 + 新建）+ `.map-shell`（nav + `.map-layout` grid `1fr 340px`）+ `#map-main`（`#maplibre-map` + 左上浮层工具条）+ `#map-settings`（顶部 2-Tab）。**用项目 Materialize + `style.css` 风格，不引 MapStage 的前端。**
+
+- **Tab A「地图效果」**：图层开关（卫星底图 / **行政区划**（主开关 `#tg-admin` + `#admin-sub` 里的边界 / 地名 / 道路 3 个子开关，`ensureAdmin()` / `_adminVis()` / `applyAdminVis()`）/ 海拔设色 / 水系 / 拆出+区域）、卫星层 6 参、山影 5 参 + 地形夸张、水系颜色、CSS 古卷滤镜、背景色。开关一律 `<label class="map-switch"><input type=checkbox></label>`（Materialize 会把裸 checkbox 设成 `opacity:0;pointer-events:none`，故自绘 `::before` 轨 + `::after` 钮 + `:has(input:checked)` 变色）。
+- **Tab B「点 / 线 / 标注」**：工具条只有 **选择 / 加点 / 连线**（无「删除」——删除走列表行里的真 `<button class="annot-del-btn">`）+ 可折叠属性编辑区 + 列表。`renderList()` 按当前工具过滤：**加点** Tab 只列点位、**连线** Tab 只列连线，**选择** Tab（两者都不是）两种都列；地图上的既有点线渲染（`renderPoints()`/`renderLinks()`）不受此过滤影响，一直全量显示。
+  - **加点 3 种方式**（`#add-point-panel`，仅「加点」模式显示）：① 地图点击选点 ② 输入经纬度（`#add-lat` / `#add-lng`，校验 ±90 / ±180）③ 地名搜索（`#geocode-q` → `authFetch("/map/geocode?q=")` → `#geocode-results` 候选列表，多结果让用户点选）。三条路径最终都走 `addPointAt(lng,lat,name)`。输入框需带 `browser-default` 类（否则 Materialize `input[type=number/search]` 强制 `height:3rem`）+ 一堆 `data-*-ignore` 关掉 1Password 弹窗。
+  - 点位：HTML `maplibregl.Marker`（`anchor:"center"`）+ CSS 图形（方 / 圆 / 菱 / 关门 / 星）+ 可选**名称徽标**（`.map-pt-badge`，`position:absolute` 挂在图形下方，尺寸变化不挪锚点）。仅**选择**模式可拖拽（`draggable: annotMode==="select"`），`dragend` 回写 `pt.lng/lat` 并重画连线 / 列表 / 属性。
+  - **`.map-pt { position: absolute }` 是硬约束**：`map.css` 在 `maplibre-gl.css` 之后加载，若为 `relative` 会盖掉 `.maplibregl-marker{position:absolute}`，marker 落回文档流、按各自 badge 尺寸层层错位（曾导致最大 badge 的点缩放时漂移）。
+  - 连线：`renderLinks()` 生成 LineString 喂 `annot-link-solid` / `annot-link-dash` 两个 line 图层（`line-dasharray` 不支持数据驱动，按 `["==",["get","dash"],true]` 拆两层，虚线 `[2,2]`）；**有向箭头** = `annot-arrowheads` GeoJSON（LineString 末点 + `bearing` + `icon` + `sizeMul`）喂 `annot-link-arrow` symbol 图层，`icon-image:["get","icon"]` + `icon-rotate` + `icon-color`（不再用字形 `➤`，Noto Sans 里没有）。
+    - **箭头样式 + 大小**：`lk.arrowStyle` ∈ `ARROW_STYLES`（`triangle` 宽三角缺口 / `narrow` 窄三角 / `chevron` 描边 ">"，默认 `triangle`）、`lk.arrowSize` 数值倍率（默认 1，0.5~3 可调）。三种样式各自是 `makeArrowImage(style, 24)` 画的朝北 canvas 图形，`map.on("load")` 时循环注册成 `annot-arrow-triangle`/`annot-arrow-narrow`/`annot-arrow-chevron` 三张 `addImage(…, {sdf:true})` 图标；图层的 `icon-size` 用每条连线自己的 `sizeMul` 倍率乘上原有的缩放插值曲线。只在「有向（箭头）」勾选时，属性面板才显示「箭头样式」「箭头大小」两个控件。
+      - **踩过的坑（`["zoom"]` 表达式位置）**：`icon-size` 最初写成 `["*", ["get","sizeMul"], ["interpolate",["linear"],["zoom"],...]]`——把 zoom 插值包在乘法里面。MapLibre style-spec 规定 `["zoom"]` 只能作为 `interpolate`/`step` 的**顶层**输入，不能嵌在其他表达式里，这个写法在浏览器控制台只报一条不起眼的黄色 warning（`"zoom" expression may only be used as input to a top-level "step" or "interpolate" expression`），但后果是**整份 style 校验失败、一个图层都加不上**——地图区域退化成 `#map-main` 自己的 CSS 背景色（纯色 `#c8c2b4`），右侧设置面板照常能用（这部分是纯 DOM/JS，不依赖 MapLibre 画布），看起来像“地图打不开”而不是报错。正确写法：把 zoom 插值留在最外层，倍率乘法挪进 `interpolate` 每个缩放档位的**输出值**里——`["interpolate",["linear"],["zoom"], 3, ["*",["get","sizeMul"],0.5], 12, ["*",["get","sizeMul"],1]]`。这类问题以后先看浏览器控制台的黄色 warning（不只是红色 error），`onMapError()` 目前对这类非 `sourceId` 的样式校验错误只是 `console.warn`，不会弹用户可见的提示。
+  - **连线名称 + 名称标注**：连线自带可编辑 `name`（默认经纬度格式，属性面板「名称」输入框），列表 / 组成员行都显示它而非坐标。可选的名称标注走单独的 `annot-link-labels` GeoJSON（各连线的中点，直线取端点中点、弧线取 `arcCoords` 插值后的中间点）+ `annot-link-label` symbol 图层，`text-field:["get","text"]` + `text-size`/`text-color` 数据驱动 + `text-rotate:["get","angle"]`（`text-rotation-alignment:"map"`，与 `bearingDeg()` 同一角度约定：0=正北顺时针）。字号 / 颜色 / 角度都在属性面板里调，角度默认等于连线当前方位角、之后独立可调（面板「对齐连线方向」按钮可手动重新对齐到当前方位角）。
+  - **选择模式下拖动连线端点**：选中连线时在 `from` / `to` 各放一个 `.link-handle` marker（`m.on("drag")` 实时改 `lk[key]` + 重画）；与点位重合时靠 DOM 顺序 + `.maplibregl-marker:has(.link-handle){z-index:5}` 消歧。
+  - **属性面板折叠**：`#annot-editor-head` 点击切 `.collapsed` + `#annot-editor` 显隐，状态存 `localStorage["map.annotEditorCollapsed"]`。
+  - **列表 = 点 / 线 / 组统一一张表，组是列表里的条目、不是单独板块**。`#annot-list` 标题栏右上是「＋ 新建组」（`startCreateGroup`）；不再有独立的「组」settings-title / `#annot-groups` 区块，也不再按工具 Tab 隐藏——组本来就混在列表里，列表本身该怎么按 Tab 过滤（加点 Tab 只看点、连线 Tab 只看线）组也照此规则过滤（组内没有匹配类型成员时，那个组在该 Tab 下不占位）。
+    - **顺序与层级**：`preset.annotations.order` 是顶层条目 id 数组（元素是「组 id」或「未分组的点/线 id」；已进组的点/线不出现在这里，顺序由所属组自己的 `members` 决定）。`renderList()` 按 `order` 遍历渲染：组头（`buildGroupRow`，加粗 + 淡靛蓝底 + `▣` 前缀 + 折叠箭头 `.grp-collapse-btn` + 解散）永远排在它所有子条目（`buildPointRow`/`buildLinkRow`，`isChild:true` 时加 `.child-row` 左缩进）前面；不属于任何组的条目和组头左边对齐、不缩进。折叠状态 `collapsedGroups[g.id]` 是纯前端内存变量，不进 preset（不占版本快照，也不跨端同步，等同一次性视图偏好）。
+    - **`ensureOrder()` 自愈**：每次 `renderList()` 前都会跑一遍——去掉已经不存在、或已被某组吞掉的 id；把新出现但还没登记的点/线/组追加到末尾。所以新建点/线/组、删点/删线之后 `order` 的一致性完全不需要在各自的创建/删除逻辑里手动维护，只有「解散组」为了让子条目**原地**变回未分组（而不是被自愈逻辑扔到列表末尾）单独处理了一次插入位置。
+    - **单一归属**：一个点/线只能属于一个组。`moveToGroup(id, targetGroupId, insertBeforeMemberId)` 是唯一的归属变更入口——先把 id 从所有组里摘掉、从顶层 `order` 里摘掉，再按需塞进目标组的 `members`（`targetGroupId` 为空则只是变成未分组）。组编辑器里勾选成员（`groupMemberRow`）和拖拽排序都走这一个函数，保证任何时候「一个 id 最多在一个组的 members 里」这条不变量。**归属变化本身绝不读写组的公共属性**（`markerColor` 等）——加入/离开组既不会被套上组的属性，也不会因为离开而丢失自己原有的属性值，这条和「组 = 统一修改，不是样式叠层」的核心设计是同一件事。
+      - **候选列表过滤，不是锁勾选框**：组属性面板的成员列表（`groupEditor()`）在渲染前先用 `groupOfMember(id)` 过滤 `preset.annotations.points/links`，只保留「本组成员」和「未分配到任何组」的条目——属于别的组的条目**根本不出现在列表里**，不是曾经的做法（列出来但把勾选框锁死、旁边挂「已在「X」」标签）。想把某个点/线转到别的组：拖拽跨组移动（`handleRowDrop`）仍然是唯一的"直接转组"路径；否则只能先去它当前所属组的面板取消勾选（退回未分组），再到目标组的面板里勾选。这样列表不会因为别的组的成员而变长。
+    - **拖拽排序**（原生 HTML5 draggable，鼠标）：每行 `wireRowDrag(row, id, isGroup, groupId)` 挂 `dragstart/dragover/drop`；`dragover` 时按鼠标 Y 相对行高的上下半判断插入在目标前还是后（`.drag-over-before`/`.drag-over-after` 描边提示）。落点语义在 `handleRowDrop()`：拖组只能在顶层挪位置（落在别人的子条目上会换算成落在那个子条目所属组块的边界）；拖点/线落在子条目上＝加入（或留在）那条子条目所属的组；落在组头上半＝变成未分组、插到该组前面，下半＝加入该组成为第一个子条目；落在未分组条目上＝变成未分组、插到它前/后。`anchorAfterExcluding()` 处理了一个边界情况：把 X 拖到「紧跟在它原本后一位的 Y」后面（几乎等于原地不动）时，如果直接找“Y 后面那个”会找到 X 自己，导致 X 被错误地弹到列表末尾——所以查找前先假装把 X 从列表里摘掉再算。
+    - **新建组：先选子条目、不允许空组**：点「＋ 新建组」只是把 `pendingGroupPick` 从 `null` 变成 `[]`（`startCreateGroup`），并不立即建组；这之后 `renderList()` 在每个点/线行前面插入勾选框（`pickCheckbox`，复用 `.map-switch`），并在列表顶部露出 `#annot-group-pick-bar`（已选 N 个 / 确定建组 / 取消）。**这个流程里已有的组和它们的成员完全不渲染**（`renderList()` 遇到 `pendingGroupPick` truthy 时直接跳过组条目）——候选列表只剩未分组的点/线，不会被别的组的成员撑长。「确定建组」（`confirmCreateGroup`）在 `pendingGroupPick` 为空时直接 toast 拒绝；非空时才真正 `push` 一个新组、把组头插到这批被选条目里原本顶层位置最靠前的那个位置、再逐个 `moveToGroup` 挪进去。picking 状态跨工具 Tab 保留（不会因为切到「连线」去挑几条线又跳回「加点」而被打断），且此时列表行的拖拽和删除按钮都临时隐藏，避免和勾选手势冲突。
+    - **组的属性面板不变**：`groupEditor()` 依然是打开一个组时属性区显示的内容——组名、成员勾选列表（列表里的复选框和上面的建组勾选框是两套独立 UI，但都收敛到同一个 `moveToGroup`）、点位公共属性（颜色 / 名称文字色 / 信息框底色+边线色 / 名称字号 / 前缀底色+文字色+字号）、连线公共属性（颜色 / 线宽 / 线形 / **箭头样式 / 箭头大小**）、「应用到全部成员」（`applyAllGroupProps`，成员被单独改过导致和组设定不一致时 `groupDivergence()` 会提示）、「解散该组」。`selectedId` 三态：点 id（`p_`）/ 线 id（`l_`）/ 组 id（`g_`），前缀不冲突，`renderEditor()` 据此分发到 `pointEditor`/`linkEditor`/`groupEditor`。
+    - **踩过的坑（按钮样式漏挂）**：「应用到全部成员」按钮最初复用了 `.annot-add-btn` 类，但那份视觉样式在 CSS 里写成 `#add-point-panel .annot-add-btn`——限定了父级选择器，组面板不在 `#add-point-panel` 下，class 挂了等于没挂，按钮退化成浏览器默认丑样式。改法：`.grp-apply-btn` 自己带全套颜色 / 圆角 / 字号（跟「按坐标添加」「＋ 新建组」视觉一致），不再依赖那条限定了父级的规则。
+- **自动保存**：`map.js:scheduleSave()` 防抖 800ms → `PATCH /map/documents/{id}`；地图 `moveend` 防抖回写 `style.camera` 并触发保存。
+- **地形网格（`setTerrain` 3D mesh）只在地球视图或 `pitch > 4` 时开**（`applyTerrain()`）；平视地图只用 hillshade / color-relief 图层，避免 marker 贴着地形起伏漂移。
+- **版本历史（做法2）**：`map_documents.preset` 实时自动保存；`map_preset_versions` 只在检查点写快照——①**首次编辑前**把「打开时的 preset」存 `open-diff` 版 ②每 120s 若 preset 变化存 `checkpoint` 版 ③工具条「存快照」存 `manual` 版。变更检测用 `snapshotKey(p)`——序列化前 `delete c.style.camera`，所以**缩放 / 平移 / 俯仰 / 旋转不算「有变化」**（相机仍实时写进 `preset` 和库，只是不触发新快照）。「存快照」按钮会先 `syncCameraNow()` 把当前视角拉进 `preset` 再 POST，故手动快照能存下当前视角。留 3 版；「历史」弹窗可回滚（回滚后整页 reload）。
+
+### 第三方依赖
+
+除地名搜索一项走服务端代理外，其余全部浏览器端直连，无 key、无 `.env` 配置。
+
+| 依赖 | 位置 / 端点 | 用途 |
+|---|---|---|
+| **MapLibre GL JS + CSS**（MapStage 的 **patched 5.6.0**，含 `__ANTIQUE_TERRAIN_CLIP_PATCH`） | 本地 vendor `static/js/maplibre/maplibre-gl.{js,css}` | 地图引擎 + 拆出所需的地形裁剪补丁；`/map/` 整页锁死用这份 |
+| 卫星栅格瓦片 | `tiles.maps.eox.at`（EOX Sentinel-2 cloudless，`{z}/{y}/{x}`） | 卫星底图 raster source |
+| 地形 DEM 瓦片 | `tiles.mapterhorn.com/{z}/{x}/{y}.webp`（`encoding: terrarium`） | 山影 + `setTerrain` 3D 地形（仅地球 / 俯视时开 mesh） |
+| 矢量瓦片 + glyphs | `tiles.openfreemap.org/planet` + `/fonts/{fontstack}/{range}.pbf` | 水系几何、行政区划（边界 / 地名 / 道路）、字形 |
+| **OSM Nominatim 地名搜索** | `nominatim.openstreetmap.org/search` —— **经服务端 `GET /map/geocode` 代理**（带 `_GEOCODE_UA`），非浏览器直连 | Tab B「加点」的地名搜索选点 |
+| **拆出整包**（vendor，原样不改） | `static/js/maplibre/mapstage/`：`map-fx.js` / `vector-paint.js` / `region-isolate.js` / `region-isolate-data.js`(1.9MB) / `terrain-island.js` / `isolate-workbench.js` / `polar-ice.geojson` + `NOTICE.md` | 区域地形岛（`AntiqueIsolateWorkbench.mount(...)`，集成路径逐字参考 MapStage `index.html:setupGlobeAndIsolate()`；mount 时 `enabled:false`、不传 `selectEl`，自己的 `#isolate-region` change 里 `setRegion(id,{frame:false})`，避免拆出把视角强行怼成 `pitch:46/bearing:-16`） |
+
+**署名（许可硬性）**：MapLibre attribution 控件显示 `Sentinel-2 cloudless © EOX`、`© Mapterhorn`、`© OpenStreetMap contributors, OpenMapTiles`；拆出开启另注 `Natural Earth (public domain) · © OpenStreetMap contributors (ODbL)`。
+
+**兜底**（`map.js:onMapError()`）：按 `e.sourceId` 分派——`basemapRaster` / `terrain` / `openmaptiles` 失败 → 一次性友好 toast + 自动关掉受影响图层 / 开关（`openmaptiles` 分支连带禁掉行政区划图层）；glyph 报错 → 「箭头可能不显示」提示；MapLibre 引擎脚本加载失败（`<script onerror>` 置 `window.__MAPLIBRE_LOAD_FAILED`）→ `#map-main` 整块提示，不初始化地图。
+
+**隐藏标签页兜底**：`document.hidden` 时 MapLibre `Style.loadJSON` 靠 `requestAnimationFrame` 推迟的 `_load` 不会执行 → 地图白屏。`initMapLibre()` 检测到 `document.hidden` 就等 `visibilitychange` 再 `_createMap()`。（副作用：浏览器自动化标签页恒为 hidden，无法用它可视化验证地图渲染。）
+
+### 模块切换下拉（需求 1）
+
+`templates/_module_switch.html` 片段——**自绘的向上弹出小菜单，不用 Materialize `M.Dropdown`**（它在 `position:absolute` 的 `.sidenav-footer` 里会被裁切 / 错位）。`base.js` 里一个 `document` 级 click 委托：点 `.module-switch-btn` 开关同级 `.module-switch` 的 `.open` 类，点菜单外收起；CSS（`.module-switch` / `.module-switch-menu` / `.module-switch.open .module-switch-menu`）在 `style.css`（`?v=5`）。`chat.html` / `writing.html` / `drawing.html` / `map.html` 侧栏底部（`#slide-out` 移动端 + 桌面 sidebar-actions 两处，`ms_dd_id` 各不同）把原来的 2~3 个兄弟跳转按钮替换为一个「切换模块」下拉，列出当前模块之外、且该用户有权限的模块（对话恒显，写作 / 作图 / 地图按 `can_write` / `can_draw` / `can_map`）。「新建X」按钮保留。`main.py:index()` 与 `writing.py` / `drawing.py` / `map.py` 的页面路由 context 均传 `can_write / can_draw / can_map`（`account.get_user` 是 `SELECT *`，加列自动带出）。

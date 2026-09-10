@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>TSAI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+    <meta name="description" content="AI by Tianshu">
+    <link rel="icon" href="/static/images/favicon.png">
+    <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=5">
+    <link rel="stylesheet" href="/static/css/drawing.css?v=14">
+</head>
+<body>
+<ul id="slide-out" class="sidenav" style="display:flex;flex-direction:column;">
+    <li class="brand-logo center" style="flex-shrink:0;">TSAI</li>
+    <li style="flex:1;"></li>
+    <li style="flex-shrink:0;border-top:1px solid #eee;">
+        <div style="display:flex;justify-content:center;gap:8px;padding:14px 12px 20px;flex-wrap:wrap;">
+            <button id="btn-new-drawing-nav" class="btn waves-effect waves-light" type="button" style="border-radius:4px;background-color:#e57373e6;white-space:nowrap;flex-shrink:0;"><span class="btn-label-lg">新建风格</span></button>
+            {% set ms_current = 'drawing' %}{% set ms_dd_id = 'module-dd-drawing-m' %}
+            {% include '_module_switch.html' %}
+        </div>
+    </li>
+</ul>
+<div id="drawing-sidebar">
+    <div class="drawing-sidebar-brand">TSAI</div>
+    <div id="drawing-list">
+        <p class="drawing-empty center-align">还没有作图风格，点击下方按钮新建</p>
+    </div>
+    <div class="drawing-sidebar-actions">
+        <button id="btn-new-drawing" class="btn waves-effect waves-light" type="button" style="background-color:#e57373e6;"><span class="btn-label-lg">新建风格</span></button>
+        {% set ms_current = 'drawing' %}{% set ms_dd_id = 'module-dd-drawing-d' %}
+        {% include '_module_switch.html' %}
+    </div>
+</div>
+<div class="drawing-shell">
+    <nav class="white z-depth-0 top-nav drawing-top-nav">
+        <div class="nav-wrapper">
+            <a id="sidenav-trigger" href="#" data-target="slide-out" class="sidenav-trigger">
+                <i class="material-icons">menu</i>
+            </a>
+            <ul class="right">
+                <li class="name-logo">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="18" height="18" style="vertical-align: middle; margin-right: 6px; fill: #ee6e73;">
+                        <path d="M224 256c70.7 0 128-57.3 128-128S294.7 0 224 0 96 57.3 96 128s57.3 128 128 128zm89.6 32h-11.8c-22.2 10.3-46.9 16-73.8 16s-51.6-5.7-73.8-16h-11.8C64.5 288 0   352.5 0 432v16c0 35.3 28.7 64 64 64h320c35.3 0 64-28.7 64-64v-16c0-79.5-64.5-144-134.4-144z"/>
+                    </svg>
+                    {{ user }}
+                </li>
+                <li>
+                    <a id="logout-btn" title="退出登录" style="padding: 0 12px 0 0; color: #aaa; cursor: pointer; line-height: 64px;">
+                        <i class="material-icons" style="vertical-align: middle; font-size: 20px;">logout</i>
+                    </a>
+                </li>
+            </ul>
+        </div>
+    </nav>
+
+    <div class="drawing-layout">
+        <div id="drawing-main">
+            <div id="generation-gallery">
+                <p class="gallery-empty" id="gallery-empty-hint">
+                    {% if style_id %}暂无生成记录，在下方输入文字开始作图{% else %}从左侧选择作图风格，或点击「新建风格」开始{% endif %}
+                </p>
+            </div>
+            <div id="prompt-input-box">
+                <textarea id="prompt-input" rows="1" placeholder="描述你想生成的画面…" {% if not style_id %}disabled{% endif %}></textarea>
+                <button id="btn-generate" class="btn waves-effect waves-light teal lighten-1" type="button" {% if not style_id %}disabled{% endif %}>生成</button>
+                <button id="btn-upload-image" class="btn waves-effect waves-light teal lighten-1" type="button" {% if not style_id %}disabled{% endif %}>上传</button>
+            </div>
+            <form id="drawing-upload-form" style="display:none;">
+                <input type="file" id="drawing-file-input" name="file" accept="image/png,image/jpeg,image/webp">
+            </form>
+        </div>
+
+        <div id="drawing-settings">
+            <div class="settings-title">作图设置</div>
+
+            <div class="setting-item">
+                <label>风格名称</label>
+                <input type="text" id="setting-name" class="browser-default setting-input" placeholder="风格名称">
+            </div>
+
+            <div class="setting-item">
+                <label>已绑定 Prompt</label>
+                <div id="bound-prompt-list"></div>
+                <button id="btn-pick-prompts" class="btn-flat waves-effect btn-block" type="button" style="text-align:left;padding-left:0;color:#5c6bc0;">
+                    <i class="material-icons" style="vertical-align:middle;font-size:16px;">add_circle_outline</i> 选择 Prompt
+                </button>
+                <button id="btn-manage-prompts" class="btn-flat waves-effect btn-block" type="button" style="text-align:left;padding-left:0;color:#5c6bc0;">
+                    <i class="material-icons" style="vertical-align:middle;font-size:16px;">settings</i> 管理 Prompt 库
+                </button>
+            </div>
+
+            <div class="setting-item">
+                <label>绑定 Skill 包</label>
+                <div id="bound-skill-package"></div>
+                <button id="btn-pick-skill-package" class="btn-flat waves-effect btn-block" type="button" style="text-align:left;padding-left:0;color:#5c6bc0;">
+                    <i class="material-icons" style="vertical-align:middle;font-size:16px;">add_circle_outline</i> 选择 Skill 包
+                </button>
+                <button id="btn-manage-skill-packages" class="btn-flat waves-effect btn-block" type="button" style="text-align:left;padding-left:0;color:#5c6bc0;">
+                    <i class="material-icons" style="vertical-align:middle;font-size:16px;">extension</i> 管理 Skill 包
+                </button>
+            </div>
+
+            <div class="setting-item">
+                <button id="btn-save-style" class="btn indigo waves-effect waves-light btn-block" disabled>保存设置</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="modal-new-drawing" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>新建作图风格</h5>
+        <form id="form-new-drawing">
+            <div class="input-field">
+                <input id="new-drawing-name" type="text" required>
+                <label for="new-drawing-name">风格名称</label>
+            </div>
+        </form>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="btn-confirm-new-drawing" class="waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+
+<div id="modal-del-drawing" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>删除作图风格</h5>
+        <p>确定要删除风格 <span id="del-drawing-name" style="color:red;font-weight:bold;"></span> 吗？该风格下的所有生成记录也会一并删除，此操作不可撤销。</p>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="btn-confirm-del-drawing" class="waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+
+<div id="modal-manage-prompts" class="modal" style="width:560px;max-height:80%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content">
+        <h5>Prompt 库</h5>
+        <p style="font-size:12px;color:#9e9e9e;margin:0 0 8px">全体作图用户共享，一个风格可勾选任意多条；新增/删除会影响所有风格的可选列表</p>
+        <input type="text" id="prompt-manage-search" class="browser-default" placeholder="搜索 Prompt 名称…" style="margin-bottom:12px;">
+        <div id="prompt-manage-list" style="margin-bottom:16px;"></div>
+        <form id="form-new-prompt">
+            <div class="input-field">
+                <input id="new-prompt-name" type="text" required>
+                <label for="new-prompt-name">Prompt 名称</label>
+            </div>
+            <div class="input-field">
+                <textarea id="new-prompt-content" class="materialize-textarea"></textarea>
+                <label for="new-prompt-content">Prompt 内容（拼入最终 prompt 的文字）</label>
+            </div>
+            <button id="btn-add-prompt" class="btn indigo waves-effect waves-light" type="submit">添加 Prompt</button>
+            <a href="#!" id="btn-cancel-edit-prompt" class="btn-flat waves-effect" style="display:none;">取消编辑</a>
+        </form>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-green btn-flat">关闭</a>
+    </div>
+</div>
+
+<div id="modal-manage-skill-packages" class="modal" style="width:640px;max-height:85%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content">
+        <h5>Skill 包</h5>
+        <p style="font-size:12px;color:#9e9e9e;margin:0 0 8px">
+            全体作图用户共享；来自第三方仓库（如 Claude/Codex skill 格式：SKILL.md + references/*.md）的完整方法论，
+            一个风格最多绑定一个。生成时会用这套方法论编译最终 prompt，而不是简单拼接。
+        </p>
+        <div id="skill-package-manage-list" style="margin-bottom:16px;"></div>
+        <form id="form-new-skill-package">
+            <div class="input-field">
+                <input id="new-skill-package-name" type="text" required>
+                <label for="new-skill-package-name">Skill 包名称</label>
+            </div>
+            <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:8px;">
+                <div class="input-field" style="flex:1;margin-bottom:0;">
+                    <input id="new-skill-package-source" type="text" placeholder="https://github.com/owner/repo">
+                    <label for="new-skill-package-source" class="active">来源仓库地址（可选）</label>
+                </div>
+                <button id="btn-fetch-skill-package" class="btn indigo lighten-1 waves-effect waves-light btn-small" type="button">从 GitHub 抓取</button>
+            </div>
+            <div class="input-field">
+                <textarea id="new-skill-package-instructions" class="materialize-textarea" style="min-height:160px;" required></textarea>
+                <label for="new-skill-package-instructions" class="active">Skill 全文（抓取后可编辑，或直接粘贴）</label>
+            </div>
+            <button id="btn-add-skill-package" class="btn indigo waves-effect waves-light" type="submit">保存 Skill 包</button>
+            <a href="#!" id="btn-cancel-edit-skill-package" class="btn-flat waves-effect" style="display:none;">取消编辑</a>
+        </form>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-green btn-flat">关闭</a>
+    </div>
+</div>
+
+<div id="modal-pick-prompts" class="modal" style="width:560px;max-height:80%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content">
+        <h5>选择 Prompt</h5>
+        <input type="text" id="pick-prompts-filter" class="browser-default" placeholder="搜索 Prompt 名称…" style="margin-bottom:12px;">
+        <div id="pick-prompts-list"></div>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" id="btn-confirm-pick-prompts" class="waves-effect waves-green btn-flat">确定</a>
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+    </div>
+</div>
+
+<div id="modal-pick-skill-package" class="modal" style="width:560px;max-height:80%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content">
+        <h5>选择 Skill 包</h5>
+        <input type="text" id="pick-skill-package-filter" class="browser-default" placeholder="搜索 Skill 包名称…" style="margin-bottom:12px;">
+        <div id="pick-skill-package-list"></div>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" id="btn-confirm-pick-skill-package" class="waves-effect waves-green btn-flat">确定</a>
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+    </div>
+</div>
+
+<div id="image-lightbox-overlay">
+    <span id="lightbox-close">&times;</span>
+    <img id="lightbox-img" src="" alt="生成结果">
+</div>
+
+<script id="drawing-init-data" type="application/json">
+{"styleId": {{ style_id | tojson }}}
+</script>
+<script src="/static/js/jquery/jquery-3.6.4.min.js"></script>
+<script src="/static/materialize/js/materialize.min.js"></script>
+<script src="/static/js/base.js"></script>
+<script src="/static/js/drawing.js?v=16"></script>
+</body>
+</html>

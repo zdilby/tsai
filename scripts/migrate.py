@@ -122,6 +122,129 @@ MIGRATIONS = [
     """),
     ("writing_evaluations.idx_task_id",
      "CREATE INDEX IF NOT EXISTS idx_writing_evaluations_task_id ON writing_evaluations(task_id, created_at DESC)"),
+
+    # users 表：作图模块权限
+    ("users.can_draw",
+     "ALTER TABLE users ADD COLUMN IF NOT EXISTS can_draw BOOLEAN NOT NULL DEFAULT FALSE"),
+
+    # drawing_skills 表：共享的固定作图 skill 库
+    ("drawing_skills.table", """
+        CREATE TABLE IF NOT EXISTS drawing_skills (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name        TEXT NOT NULL,
+            snippet     TEXT NOT NULL DEFAULT '',
+            created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """),
+
+    # drawing_styles 表：作图风格（侧栏 tab）
+    ("drawing_styles.table", """
+        CREATE TABLE IF NOT EXISTS drawing_styles (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name        TEXT NOT NULL DEFAULT '未命名风格',
+            prompt      TEXT NOT NULL DEFAULT '',
+            skill_ids   JSONB NOT NULL DEFAULT '[]',
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """),
+    ("drawing_styles.idx_user_id",
+     "CREATE INDEX IF NOT EXISTS idx_drawing_styles_user_id ON drawing_styles(user_id)"),
+
+    # drawing_generations 表：生成记录（本地磁盘 + DB 路径）
+    ("drawing_generations.table", """
+        CREATE TABLE IF NOT EXISTS drawing_generations (
+            id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            style_id     UUID NOT NULL REFERENCES drawing_styles(id) ON DELETE CASCADE,
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            user_input   TEXT NOT NULL DEFAULT '',
+            full_prompt  TEXT NOT NULL DEFAULT '',
+            image_path   TEXT DEFAULT '',
+            model        TEXT DEFAULT '',
+            status       TEXT NOT NULL DEFAULT 'pending',
+            error_msg    TEXT DEFAULT '',
+            created_at   TIMESTAMPTZ DEFAULT NOW()
+        )
+    """),
+    ("drawing_generations.idx_style_id",
+     "CREATE INDEX IF NOT EXISTS idx_drawing_generations_style_id ON drawing_generations(style_id, created_at DESC)"),
+
+    # drawing_generations 表：迭代编辑历史链（自引用父子关系）
+    ("drawing_generations.parent_generation_id",
+     "ALTER TABLE drawing_generations ADD COLUMN IF NOT EXISTS parent_generation_id UUID REFERENCES drawing_generations(id) ON DELETE CASCADE"),
+    ("drawing_generations.idx_parent",
+     "CREATE INDEX IF NOT EXISTS idx_drawing_generations_parent ON drawing_generations(parent_generation_id)"),
+
+    # drawing_skill_packages 表：第三方"Skill 包"（完整方法论文档，非零散片段）
+    ("drawing_skill_packages.table", """
+        CREATE TABLE IF NOT EXISTS drawing_skill_packages (
+            id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name          TEXT NOT NULL,
+            source_url    TEXT DEFAULT '',
+            kind          TEXT NOT NULL DEFAULT 'instruction',
+            instructions  TEXT NOT NULL DEFAULT '',
+            mcp_config    JSONB,
+            created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at    TIMESTAMPTZ DEFAULT NOW()
+        )
+    """),
+    ("drawing_styles.skill_package_id",
+     "ALTER TABLE drawing_styles ADD COLUMN IF NOT EXISTS skill_package_id UUID REFERENCES drawing_skill_packages(id) ON DELETE SET NULL"),
+
+    # drawing_skills 改名为 drawing_prompts：合并"风格私有 prompt"和"共享 skill 片段库"为统一的 Prompt 库概念
+    ("drawing_prompts.rename_from_skills", """
+        DO $$ BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'drawing_skills')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'drawing_prompts') THEN
+                ALTER TABLE drawing_skills RENAME TO drawing_prompts;
+            END IF;
+        END $$
+    """),
+    ("drawing_prompts.table", """
+        CREATE TABLE IF NOT EXISTS drawing_prompts (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name        TEXT NOT NULL,
+            content     TEXT NOT NULL DEFAULT '',
+            created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """),
+    ("drawing_prompts.rename_snippet_to_content", """
+        DO $$ BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'drawing_prompts' AND column_name = 'snippet') THEN
+                ALTER TABLE drawing_prompts RENAME COLUMN snippet TO content;
+            END IF;
+        END $$
+    """),
+    ("drawing_styles.rename_skill_ids_to_prompt_ids", """
+        DO $$ BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'drawing_styles' AND column_name = 'skill_ids') THEN
+                ALTER TABLE drawing_styles RENAME COLUMN skill_ids TO prompt_ids;
+            END IF;
+        END $$
+    """),
+    ("drawing_styles.drop_prompt_column",
+     "ALTER TABLE drawing_styles DROP COLUMN IF EXISTS prompt"),
+
+    # writing_section_images 表：段落内"[配图：xxx]"标记对应的 prompt 草稿 + 最终上传图片
+    ("writing_section_images.table", """
+        CREATE TABLE IF NOT EXISTS writing_section_images (
+          id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          section_id    UUID NOT NULL REFERENCES writing_sections(id) ON DELETE CASCADE,
+          marker_text   TEXT NOT NULL,
+          prompt        TEXT NOT NULL DEFAULT '',
+          image_path    TEXT DEFAULT '',
+          created_at    TIMESTAMPTZ DEFAULT NOW(),
+          updated_at    TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE (section_id, marker_text)
+        )
+    """),
+    ("writing_section_images.idx_section_id",
+     "CREATE INDEX IF NOT EXISTS idx_writing_section_images_section_id ON writing_section_images(section_id)"),
 ]
 
 

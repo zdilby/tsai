@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>TSAI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+    <meta name="description" content="AI by Tianshu">
+    <link rel="icon" href="/static/images/favicon.png">
+    <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=5">
+    <link rel="stylesheet" href="/static/js/maplibre/maplibre-gl.css">
+    <link rel="stylesheet" href="/static/css/map.css?v=20">
+</head>
+<body>
+<ul id="slide-out" class="sidenav" style="display:flex;flex-direction:column;">
+    <li class="brand-logo center" style="flex-shrink:0;">TSAI</li>
+    <li style="flex:1;"></li>
+    <li style="flex-shrink:0;border-top:1px solid #eee;">
+        <div style="display:flex;justify-content:center;gap:8px;padding:14px 12px 20px;flex-wrap:wrap;">
+            <button id="btn-new-map-nav" class="btn waves-effect waves-light" type="button" style="border-radius:4px;background-color:#e57373e6;white-space:nowrap;flex-shrink:0;"><span class="btn-label-lg">新建地图</span></button>
+            {% set ms_current = 'map' %}{% set ms_dd_id = 'module-dd-map-m' %}
+            {% include '_module_switch.html' %}
+        </div>
+    </li>
+</ul>
+
+<div id="map-sidebar">
+    <div class="map-sidebar-brand">TSAI</div>
+    <div id="map-list">
+        <p class="map-empty center-align">还没有地图，点击下方按钮新建</p>
+    </div>
+    <div class="map-sidebar-actions">
+        <button id="btn-new-map" class="btn waves-effect waves-light" type="button" style="background-color:#e57373e6;"><span class="btn-label-lg">新建地图</span></button>
+        {% set ms_current = 'map' %}{% set ms_dd_id = 'module-dd-map-d' %}
+        {% include '_module_switch.html' %}
+    </div>
+</div>
+
+<div class="map-shell">
+    <nav class="white z-depth-0 top-nav map-top-nav">
+        <div class="nav-wrapper">
+            <a id="sidenav-trigger" href="#" data-target="slide-out" class="sidenav-trigger">
+                <i class="material-icons">menu</i>
+            </a>
+            <ul class="right">
+                <li class="name-logo">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="18" height="18" style="vertical-align: middle; margin-right: 6px; fill: #ee6e73;">
+                        <path d="M224 256c70.7 0 128-57.3 128-128S294.7 0 224 0 96 57.3 96 128s57.3 128 128 128zm89.6 32h-11.8c-22.2 10.3-46.9 16-73.8 16s-51.6-5.7-73.8-16h-11.8C64.5 288 0   352.5 0 432v16c0 35.3 28.7 64 64 64h320c35.3 0 64-28.7 64-64v-16c0-79.5-64.5-144-134.4-144z"/>
+                    </svg>
+                    {{ user }}
+                </li>
+                <li>
+                    <a id="logout-btn" title="退出登录" style="padding: 0 12px 0 0; color: #aaa; cursor: pointer; line-height: 64px;">
+                        <i class="material-icons" style="vertical-align: middle; font-size: 20px;">logout</i>
+                    </a>
+                </li>
+            </ul>
+        </div>
+    </nav>
+
+    <div class="map-layout">
+        <div id="map-main">
+            <div id="maplibre-map"></div>
+
+            <!-- 左上浮层工具条 -->
+            <div id="map-toolbar" class="map-hidden-when-empty">
+                <div class="seg" id="viewmode-seg">
+                    <button type="button" data-mode="map" class="active">地图</button>
+                    <button type="button" data-mode="globe">地球</button>
+                </div>
+                <button id="btn-recenter" class="mt-btn" type="button" title="回到中国概览">复位</button>
+                <button id="btn-copy-json" class="mt-btn" type="button">复制 JSON</button>
+                <button id="btn-download-json" class="mt-btn" type="button">下载 JSON</button>
+                <button id="btn-paste-json" class="mt-btn" type="button">粘贴 JSON</button>
+                <button id="btn-snapshot" class="mt-btn" type="button" title="存一个可回滚的快照">存快照</button>
+                <button id="btn-history" class="mt-btn" type="button">历史</button>
+            </div>
+
+            <div id="map-empty-state">
+                {% if map_id %}地图加载中…{% else %}从左侧选择地图，或点击「新建地图」开始{% endif %}
+            </div>
+
+            <!-- 第三方服务不可用时的兜底提示 -->
+            <div id="map-fatal" style="display:none;"></div>
+        </div>
+
+        <div id="map-settings" class="map-hidden-when-empty">
+            <div class="map-tabs">
+                <a href="#!" data-tab="style" class="active">地图效果</a>
+                <a href="#!" data-tab="annot">点 / 线 / 标注</a>
+            </div>
+
+            <!-- ============ Tab A：地图效果 ============ -->
+            <div id="tab-style" class="map-tab-panel">
+                <div class="setting-item">
+                    <label>地图名称</label>
+                    <input type="text" id="map-name" class="browser-default setting-input" placeholder="地图名称">
+                </div>
+
+                <div class="settings-title">图层</div>
+                <div class="setting-item map-toggle-row">
+                    <span>卫星底图</span>
+                    <label class="map-switch"><input type="checkbox" id="tg-satellite"></label>
+                </div>
+                <div class="setting-item map-toggle-row">
+                    <span>行政区划</span>
+                    <label class="map-switch"><input type="checkbox" id="tg-admin"></label>
+                </div>
+                <div id="admin-sub" style="display:none;">
+                    <div class="setting-item map-toggle-row map-sub">
+                        <span>· 边界（国界 / 省界）</span>
+                        <label class="map-switch"><input type="checkbox" id="tg-admin-boundary"></label>
+                    </div>
+                    <div class="setting-item map-toggle-row map-sub">
+                        <span>· 地名</span>
+                        <label class="map-switch"><input type="checkbox" id="tg-admin-place"></label>
+                    </div>
+                    <div class="setting-item map-toggle-row map-sub">
+                        <span>· 道路（高速 / 国道 / 主干道）</span>
+                        <label class="map-switch"><input type="checkbox" id="tg-admin-road"></label>
+                    </div>
+                </div>
+                <div class="setting-item map-toggle-row">
+                    <span>海拔设色</span>
+                    <label class="map-switch"><input type="checkbox" id="tg-relief"></label>
+                </div>
+                <div class="setting-item map-toggle-row">
+                    <span>水系</span>
+                    <label class="map-switch"><input type="checkbox" id="tg-water"></label>
+                </div>
+                <div class="setting-item map-toggle-row">
+                    <span>拆出（区域地形岛）</span>
+                    <label class="map-switch"><input type="checkbox" id="tg-isolate"></label>
+                </div>
+                <div class="setting-item" id="isolate-region-wrap" style="display:none;">
+                    <label>拆出区域</label>
+                    <select id="isolate-region" class="browser-default setting-input"></select>
+                </div>
+
+                <div class="settings-title">卫星层</div>
+                <div class="setting-item"><label>不透明度 <span class="v" data-for="satellite.opacity"></span></label><input type="range" min="0" max="1" step="0.01" data-key="satellite.opacity"></div>
+                <div class="setting-item"><label>饱和度 <span class="v" data-for="satellite.saturation"></span></label><input type="range" min="-1" max="1" step="0.01" data-key="satellite.saturation"></div>
+                <div class="setting-item"><label>对比度 <span class="v" data-for="satellite.contrast"></span></label><input type="range" min="-1" max="1" step="0.01" data-key="satellite.contrast"></div>
+                <div class="setting-item"><label>亮度下限 <span class="v" data-for="satellite.brightnessMin"></span></label><input type="range" min="0" max="1" step="0.01" data-key="satellite.brightnessMin"></div>
+                <div class="setting-item"><label>亮度上限 <span class="v" data-for="satellite.brightnessMax"></span></label><input type="range" min="0" max="1" step="0.01" data-key="satellite.brightnessMax"></div>
+                <div class="setting-item"><label>色相旋转° <span class="v" data-for="satellite.hueRotate"></span></label><input type="range" min="-180" max="180" step="1" data-key="satellite.hueRotate"></div>
+
+                <div class="settings-title">山影 / 地形</div>
+                <div class="setting-item"><label>山影强度 <span class="v" data-for="hillshade.exaggeration"></span></label><input type="range" min="0" max="1" step="0.01" data-key="hillshade.exaggeration"></div>
+                <div class="setting-item"><label>光照方向° <span class="v" data-for="hillshade.illuminationDirection"></span></label><input type="range" min="0" max="359" step="1" data-key="hillshade.illuminationDirection"></div>
+                <div class="setting-item"><label>阴影色</label><input type="color" data-key="hillshade.shadowColor" class="map-color"></div>
+                <div class="setting-item"><label>高光色</label><input type="color" data-key="hillshade.highlightColor" class="map-color"></div>
+                <div class="setting-item"><label>强调色</label><input type="color" data-key="hillshade.accentColor" class="map-color"></div>
+                <div class="setting-item"><label>地形夸张（3D 高度） <span class="v" data-for="terrainExaggeration"></span></label><input type="range" min="0" max="3" step="0.05" data-key="terrainExaggeration"></div>
+
+                <div class="settings-title">水系颜色</div>
+                <div class="setting-item"><label>湖泊填充</label><input type="text" data-key="water.lakeFill" class="browser-default setting-input map-rgba"></div>
+                <div class="setting-item"><label>湖泊描边</label><input type="text" data-key="water.lakeOutline" class="browser-default setting-input map-rgba"></div>
+                <div class="setting-item"><label>河流（大）</label><input type="text" data-key="water.riverLevel1" class="browser-default setting-input map-rgba"></div>
+                <div class="setting-item"><label>河流（中）</label><input type="text" data-key="water.riverLevel2" class="browser-default setting-input map-rgba"></div>
+                <div class="setting-item"><label>河流（小）</label><input type="text" data-key="water.riverLevel3" class="browser-default setting-input map-rgba"></div>
+
+                <div class="settings-title">CSS 古卷滤镜</div>
+                <div class="setting-item map-toggle-row"><span>启用滤镜</span><label class="map-switch"><input type="checkbox" id="tg-css"></label></div>
+                <div class="setting-item"><label>sepia <span class="v" data-for="css.sepia"></span></label><input type="range" min="0" max="1" step="0.01" data-key="css.sepia"></div>
+                <div class="setting-item"><label>saturate <span class="v" data-for="css.saturate"></span></label><input type="range" min="0" max="2" step="0.01" data-key="css.saturate"></div>
+                <div class="setting-item"><label>contrast <span class="v" data-for="css.contrast"></span></label><input type="range" min="0" max="2" step="0.01" data-key="css.contrast"></div>
+                <div class="setting-item"><label>brightness <span class="v" data-for="css.brightness"></span></label><input type="range" min="0" max="2" step="0.01" data-key="css.brightness"></div>
+                <div class="setting-item"><label>hue-rotate° <span class="v" data-for="css.hueRotate"></span></label><input type="range" min="-180" max="180" step="1" data-key="css.hueRotate"></div>
+                <div class="setting-item"><label>暖色叠加 alpha <span class="v" data-for="css.warmTintAlpha"></span></label><input type="range" min="0" max="0.4" step="0.005" data-key="css.warmTintAlpha"></div>
+                <div class="setting-item"><label>暖色</label><input type="color" data-key="css.warmTintColor" class="map-color"></div>
+                <div class="setting-item"><label>暗角 <span class="v" data-for="css.vignetteStrength"></span></label><input type="range" min="0" max="0.6" step="0.01" data-key="css.vignetteStrength"></div>
+
+                <div class="settings-title">背景</div>
+                <div class="setting-item"><label>底色（羊皮纸）</label><input type="color" data-key="backgroundColor" class="map-color"></div>
+            </div>
+
+            <!-- ============ Tab B：点 / 线 / 标注 ============ -->
+            <div id="tab-annot" class="map-tab-panel" style="display:none;">
+                <div class="settings-title">工具</div>
+                <div class="setting-item">
+                    <div class="annot-tools">
+                        <button type="button" class="annot-tool active" data-mode="select">选择</button>
+                        <button type="button" class="annot-tool" data-mode="add-point">加点</button>
+                        <button type="button" class="annot-tool" data-mode="add-link">连线</button>
+                    </div>
+                    <p class="annot-hint" id="annot-mode-hint"></p>
+                </div>
+
+                <div class="setting-item" id="add-point-panel" style="display:none;">
+                    <div class="annot-field">
+                        <label>方式二 · 按经纬度</label>
+                        <div class="annot-inline">
+                            <input type="number" id="add-lat" class="annot-in browser-default" placeholder="纬度" step="any">
+                            <input type="number" id="add-lng" class="annot-in browser-default" placeholder="经度" step="any">
+                            <button type="button" class="annot-add-btn" id="btn-add-latlng">按坐标添加</button>
+                        </div>
+                    </div>
+                    <div class="annot-field">
+                        <label>方式三 · 按地名搜索</label>
+                        <div class="annot-inline">
+                            <input type="text" id="geocode-q" class="annot-in browser-default" placeholder="地名，如 武威 / 敦煌"
+                                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                                   data-1p-ignore data-lpignore="true" data-form-type="other" data-bwignore>
+                            <button type="button" class="annot-add-btn" id="btn-geocode">搜索</button>
+                        </div>
+                        <div id="geocode-results"></div>
+                    </div>
+                </div>
+
+                <div class="settings-title collapsible" id="annot-editor-head">
+                    <span>属性</span>
+                    <button type="button" class="collapse-btn" title="折叠 / 展开属性面板" aria-label="折叠或展开属性面板">▾</button>
+                </div>
+                <div class="setting-item" id="annot-editor">
+                    <p class="annot-hint">选中一个点或一条线来编辑；或用「加点」在地图上点击。</p>
+                </div>
+
+                <div class="settings-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>列表</span>
+                    <button type="button" id="btn-new-group" class="grp-new-btn">＋ 新建组</button>
+                </div>
+                <div class="setting-item" id="annot-group-pick-bar" style="display:none;">
+                    <div class="grp-pick-bar">
+                        <span id="annot-group-pick-count" class="grp-mem-count">已选 0 个</span>
+                        <button type="button" id="btn-confirm-group-pick" class="grp-pick-btn primary">确定建组</button>
+                        <button type="button" id="btn-cancel-group-pick" class="grp-pick-btn ghost">取消</button>
+                    </div>
+                    <p class="annot-hint" style="margin-top:6px;">勾选下面列表里要加入新组的点 / 线，至少选一个，再点「确定建组」。</p>
+                </div>
+                <div class="setting-item" id="annot-list"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 新建地图 -->
+<div id="modal-new-map" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content" style="padding-bottom:10px;">
+        <h5>新建地图</h5>
+        <form id="form-new-map">
+            <div class="input-field">
+                <input id="new-map-name" type="text" required>
+                <label for="new-map-name">地图名称</label>
+            </div>
+        </form>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="btn-confirm-new-map" class="waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+
+<!-- 删除地图 -->
+<div id="modal-del-map" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content" style="padding-bottom:10px;">
+        <h5>删除地图</h5>
+        <p>确定要删除 <span id="del-map-name" style="color:red;font-weight:bold;"></span> 吗？此操作不可撤销。</p>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="btn-confirm-del-map" class="waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+
+<!-- 粘贴 JSON -->
+<div id="modal-paste-json" class="modal" style="width:560px;max-height:80%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content">
+        <h5>粘贴 JSON 预设</h5>
+        <p style="font-size:12px;color:#9e9e9e;">可粘贴本站导出的 JSON，或 MapStage Demo 的「复制 JSON」（其中的样式部分会被套用）。</p>
+        <textarea id="paste-json-text" class="materialize-textarea" style="min-height:200px;font-family:monospace;"></textarea>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" id="btn-apply-paste-json" class="waves-effect waves-green btn-flat">套用</a>
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+    </div>
+</div>
+
+<!-- 历史版本 -->
+<div id="modal-history" class="modal" style="width:520px;max-height:80%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content">
+        <h5>版本历史</h5>
+        <p style="font-size:12px;color:#9e9e9e;">保留最近 3 个检查点快照。回滚会把当前地图替换为所选版本。</p>
+        <div id="history-list"></div>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-green btn-flat">关闭</a>
+    </div>
+</div>
+
+<script id="map-init-data" type="application/json">
+{"mapId": {{ map_id | tojson }}}
+</script>
+<script src="/static/js/jquery/jquery-3.6.4.min.js"></script>
+<script src="/static/materialize/js/materialize.min.js"></script>
+<script src="/static/js/base.js"></script>
+<script src="/static/js/maplibre/maplibre-gl.js" onerror="window.__MAPLIBRE_LOAD_FAILED=true"></script>
+<script src="/static/js/maplibre/mapstage/map-fx.js"></script>
+<script src="/static/js/maplibre/mapstage/vector-paint.js"></script>
+<script src="/static/js/maplibre/mapstage/region-isolate.js"></script>
+<script src="/static/js/maplibre/mapstage/terrain-island.js"></script>
+<script src="/static/js/maplibre/mapstage/isolate-workbench.js"></script>
+<script defer src="/static/js/maplibre/mapstage/region-isolate-data.js"></script>
+<script src="/static/js/map.js?v=29"></script>
+</body>
+</html>

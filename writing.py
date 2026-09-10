@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,9 @@ from backend.db import (
     upsert_writing_sections,
     update_writing_section,
     delete_writing_section,
+    get_writing_section_images,
+    upsert_writing_section_image_prompt,
+    upsert_writing_section_image_file,
     update_style_skills,
     save_writing_evaluation,
     get_latest_evaluation,
@@ -258,7 +262,12 @@ async def writing_page(request: Request, user: dict = Depends(require_write_acce
         return RedirectResponse(url=f"/writing/{latest_task_id}")
     return _templates.TemplateResponse(
         "writing.html",
-        {"request": request, "task_id": None, "task": None, "user": user["username"]},
+        {
+            "request": request, "task_id": None, "task": None, "user": user["username"],
+            "can_write": bool(user["can_write"] or user["is_admin"]),
+            "can_draw": bool(user["can_draw"] or user["is_admin"]),
+            "can_map": bool(user["can_map"] or user["is_admin"]),
+        },
     )
 
 
@@ -289,6 +298,15 @@ class UpdateSectionRequest(BaseModel):
     content: Optional[str] = None
     word_count_target: Optional[int] = None
     status: Optional[str] = None
+
+
+class GenerateImagePromptRequest(BaseModel):
+    marker_text: str
+
+
+class SaveImagePromptRequest(BaseModel):
+    marker_text: str
+    prompt: str
 
 
 def _serialize_value(value):
@@ -797,6 +815,135 @@ async def patch_section(
     return {"success": True}
 
 
+_SECTION_IMAGE_CONTENT_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+
+
+@writing_router.get("/tasks/{task_id}/sections/{section_id}/images")
+async def list_section_images(
+    task_id: str,
+    section_id: str,
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    if not await get_writing_section(section_id, task_id):
+        raise HTTPException(status_code=404, detail="段落不存在")
+    rows = await get_writing_section_images(section_id)
+    return [
+        {
+            "marker_text": r["marker_text"],
+            "prompt": r["prompt"],
+            "image_url": ("/" + r["image_path"]) if r.get("image_path") else None,
+        }
+        for r in rows
+    ]
+
+
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/images/generate-prompt")
+async def generate_section_image_prompt(
+    task_id: str,
+    section_id: str,
+    payload: GenerateImagePromptRequest,
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+    section = await get_writing_section(section_id, task_id)
+    if not section:
+        raise HTTPException(status_code=404, detail="段落不存在")
+
+    marker_text = payload.marker_text.strip()
+    if not marker_text:
+        raise HTTPException(status_code=400, detail="配图描述为空")
+
+    reference_files = task.get("reference_files") or []
+    rag_text = ""
+    if reference_files:
+        q = f"{task['title']} {section['heading']} {marker_text}"
+        embedding = await get_embedding(embed_client, q)
+        rag_results = await query_rag(
+            embedding,
+            session_id=str(task["session_id"]),
+            source_files=reference_files,
+        )
+        rag_text = "\n".join(r["content"] for r in rag_results)
+
+    prompt = (
+        "你是文章配图 prompt 撰写助手。任务：为文章中的一处配图需求生成一段可以直接交给"
+        "图像生成模型执行的 image-gen prompt。\n"
+        f"文章标题：{task['title']}\n本章节标题：{section['heading']}\n"
+        f"本章节正文（配图要和这段内容相关）：\n{section.get('content', '')}\n"
+        f"参考资料：\n{rag_text}\n这处配图的需求描述：{marker_text}\n"
+        "请先理解这处配图具体要表达什么内容，结合正文和参考资料整理出必要的细节"
+        "（涉及的具体人名、结构、数据等），再给出一段完整、具体、可以直接执行的 prompt"
+        "（视觉描述部分用英文，图上需要出现的中文文字保留中文）。"
+        "只输出最终 prompt 文本本身，不要解释、不要加引号、不要输出思考过程。"
+    )
+    try:
+        resp = await client.aio.models.generate_content(model=settings.generation_model, contents=prompt)
+        generated = (resp.text or "").strip()
+    except Exception as e:
+        logger.exception("配图 prompt 生成失败: %s", e)
+        raise HTTPException(status_code=502, detail=f"生成失败：{e}")
+    if not generated:
+        raise HTTPException(status_code=502, detail="生成结果为空，请重试")
+    return {"prompt": generated}
+
+
+@writing_router.patch("/tasks/{task_id}/sections/{section_id}/images")
+async def save_section_image_prompt(
+    task_id: str,
+    section_id: str,
+    payload: SaveImagePromptRequest,
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    if not await get_writing_section(section_id, task_id):
+        raise HTTPException(status_code=404, detail="段落不存在")
+    marker_text = payload.marker_text.strip()
+    if not marker_text:
+        raise HTTPException(status_code=400, detail="配图描述为空")
+    await upsert_writing_section_image_prompt(section_id, marker_text, payload.prompt)
+    return {"success": True}
+
+
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/images/upload")
+async def upload_section_image(
+    task_id: str,
+    section_id: str,
+    marker_text: str = Form(...),
+    file: UploadFile = File(...),
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    if not await get_writing_section(section_id, task_id):
+        raise HTTPException(status_code=404, detail="段落不存在")
+    marker_text = marker_text.strip()
+    if not marker_text:
+        raise HTTPException(status_code=400, detail="配图描述为空")
+
+    ext = _SECTION_IMAGE_CONTENT_TYPES.get(file.content_type)
+    if not ext:
+        raise HTTPException(status_code=400, detail="仅支持上传 PNG/JPEG/WEBP 图片")
+
+    content = await file.read()
+    max_mb = user["max_file_size_mb"] if user["max_file_size_mb"] is not None else 10
+    if max_mb > 0 and len(content) > max_mb * 1024 * 1024:
+        size_mb = round(len(content) / 1024 / 1024, 1)
+        raise HTTPException(status_code=413, detail=f"文件大小 {size_mb}MB 超过上限 {max_mb}MB")
+
+    image_id = str(uuid.uuid4())
+    save_dir = settings.base_dir / "static" / "writing_images" / user["username"] / task_id
+    save_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{image_id}.{ext}"
+    (save_dir / filename).write_bytes(content)
+    relative_path = str(Path("static") / "writing_images" / user["username"] / task_id / filename)
+
+    await upsert_writing_section_image_file(section_id, marker_text, relative_path)
+    return {"image_url": "/" + relative_path, "marker_text": marker_text}
+
+
 @writing_router.post("/tasks/{task_id}/sections/{section_id}/generate")
 async def generate_section_content(
     task_id: str,
@@ -972,6 +1119,83 @@ async def section_chat(
     display_answer = _extract_chat_display(
         answer, "[SECTION_UPDATE_START]", "[SECTION_UPDATE_END]",
         fallback="✓ 已根据你的指令修改了该段落内容",
+    )
+    await save_message(task["session_id"], "assistant", display_answer)
+
+    return {"answer": answer}
+
+
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/images/chat")
+async def section_image_chat(
+    task_id: str,
+    section_id: str,
+    message: str = Form(...),
+    marker_text: str = Form(...),
+    current_prompt: str = Form(""),
+    user: dict = Depends(require_write_access),
+):
+    await _ensure_task_owner(task_id, user["id"])
+    task = await get_writing_task(task_id, user["id"])
+    if not task:
+        raise HTTPException(status_code=404, detail="写作任务不存在")
+    section = await get_writing_section(section_id, task_id)
+    if not section:
+        raise HTTPException(status_code=404, detail="段落不存在")
+
+    reference_files = task.get("reference_files") or []
+    rag_text = ""
+    if reference_files:
+        embedding = await get_embedding(embed_client, f"{message} {section['heading']} {marker_text}")
+        rag_results = await query_rag(
+            embedding,
+            session_id=str(task["session_id"]),
+            source_files=reference_files,
+        )
+        rag_text = "\n".join(r["content"] for r in rag_results)
+
+    system_instruction = _chat_system_instruction(
+        "这处配图的 Prompt", "[IMAGE_PROMPT_UPDATE_START]", "[IMAGE_PROMPT_UPDATE_END]",
+    )
+
+    content_block = (
+        f"\n\n## 当前 Prompt 草稿\n\n{current_prompt}"
+        if current_prompt else "\n\n## 当前 Prompt 草稿\n\n（尚未生成）"
+    )
+    rag_block = f"\n\n## 参考资料片段\n\n{rag_text}" if rag_text else ""
+
+    await save_message(task["session_id"], "user", message)
+    context = await get_context(task["session_id"], limit=settings.max_history_turns)
+    history_text = "\n".join(f"{c['role']}: {c['content']}" for c in context)
+    history_block = (
+        f"\n\n## 最近对话历史（判断是否已提出修改方案并获得同意时请参考）\n{history_text}"
+        if history_text else ""
+    )
+
+    prompt = (
+        f"## 写作任务\n标题：{task['title']}\n风格：{task['style_req']}\n内容要求：{task['content_req']}\n"
+        f"## 当前章节：{section['heading']}\n## 这处配图的需求描述：{marker_text}"
+        f"{content_block}{rag_block}{history_block}\n\n## 用户最新消息\n\n{message}"
+    )
+
+    grounding_tool = gtypes.Tool(google_search=gtypes.GoogleSearch())
+    config = gtypes.GenerateContentConfig(
+        system_instruction=system_instruction,
+        tools=[grounding_tool],
+        max_output_tokens=65536,
+    )
+
+    try:
+        resp = await client.aio.models.generate_content(
+            model=settings.generation_model, contents=prompt, config=config,
+        )
+        answer = resp.text
+    except Exception as e:
+        logger.exception("配图 Prompt 对话生成失败: %s", e)
+        raise HTTPException(status_code=502, detail="AI 服务暂时不可用")
+
+    display_answer = _extract_chat_display(
+        answer, "[IMAGE_PROMPT_UPDATE_START]", "[IMAGE_PROMPT_UPDATE_END]",
+        fallback="✓ 已根据你的指令修改了这段 Prompt",
     )
     await save_message(task["session_id"], "assistant", display_answer)
 
@@ -1236,5 +1460,10 @@ async def writing_task_page(task_id: str, request: Request, user: dict = Depends
     task = await get_writing_task(task_id, user["id"])
     return _templates.TemplateResponse(
         "writing.html",
-        {"request": request, "task_id": task_id, "task": task, "user": user["username"]},
+        {
+            "request": request, "task_id": task_id, "task": task, "user": user["username"],
+            "can_write": bool(user["can_write"] or user["is_admin"]),
+            "can_draw": bool(user["can_draw"] or user["is_admin"]),
+            "can_map": bool(user["can_map"] or user["is_admin"]),
+        },
     )

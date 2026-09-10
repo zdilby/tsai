@@ -295,6 +295,24 @@ async def init_writing_tables():
         CREATE INDEX IF NOT EXISTS idx_writing_sections_task_id
         ON writing_sections(task_id, section_index)
     """)
+
+    # --- writing_section_images：段落内"[配图：xxx]"标记对应的 prompt 草稿 + 最终上传图片 ---
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS writing_section_images (
+          id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          section_id    UUID NOT NULL REFERENCES writing_sections(id) ON DELETE CASCADE,
+          marker_text   TEXT NOT NULL,
+          prompt        TEXT NOT NULL DEFAULT '',
+          image_path    TEXT DEFAULT '',
+          created_at    TIMESTAMPTZ DEFAULT NOW(),
+          updated_at    TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE (section_id, marker_text)
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_writing_section_images_section_id
+        ON writing_section_images(section_id)
+    """)
     # --- writing_tasks: style skills + source ---
     await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_skills TEXT DEFAULT '';")
     await database.execute("ALTER TABLE writing_tasks ADD COLUMN IF NOT EXISTS style_skills_updated_at TIMESTAMPTZ;")
@@ -316,6 +334,106 @@ async def init_writing_tables():
         CREATE INDEX IF NOT EXISTS idx_writing_evaluations_task_id
         ON writing_evaluations(task_id, created_at DESC)
     """)
+
+
+async def init_drawing_tables():
+    await database.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_draw BOOLEAN NOT NULL DEFAULT FALSE;")
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS drawing_prompts (
+          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          name        TEXT NOT NULL,
+          content     TEXT NOT NULL DEFAULT '',
+          created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS drawing_styles (
+          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name        TEXT NOT NULL DEFAULT '未命名风格',
+          prompt_ids  JSONB NOT NULL DEFAULT '[]',
+          created_at  TIMESTAMPTZ DEFAULT NOW(),
+          updated_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_drawing_styles_user_id ON drawing_styles(user_id)
+    """)
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS drawing_generations (
+          id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          style_id     UUID NOT NULL REFERENCES drawing_styles(id) ON DELETE CASCADE,
+          user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          user_input   TEXT NOT NULL DEFAULT '',
+          full_prompt  TEXT NOT NULL DEFAULT '',
+          image_path   TEXT DEFAULT '',
+          model        TEXT DEFAULT '',
+          status       TEXT NOT NULL DEFAULT 'pending',
+          error_msg    TEXT DEFAULT '',
+          created_at   TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_drawing_generations_style_id
+        ON drawing_generations(style_id, created_at DESC)
+    """)
+    await database.execute("""
+        ALTER TABLE drawing_generations ADD COLUMN IF NOT EXISTS
+          parent_generation_id UUID REFERENCES drawing_generations(id) ON DELETE CASCADE
+    """)
+    await database.execute("""
+        CREATE INDEX IF NOT EXISTS idx_drawing_generations_parent
+        ON drawing_generations(parent_generation_id)
+    """)
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS drawing_skill_packages (
+          id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          name          TEXT NOT NULL,
+          source_url    TEXT DEFAULT '',
+          kind          TEXT NOT NULL DEFAULT 'instruction',
+          instructions  TEXT NOT NULL DEFAULT '',
+          mcp_config    JSONB,
+          created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at    TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute("""
+        ALTER TABLE drawing_styles ADD COLUMN IF NOT EXISTS
+          skill_package_id UUID REFERENCES drawing_skill_packages(id) ON DELETE SET NULL
+    """)
+
+
+async def init_map_tables():
+    """地图模块：map_documents（一张地图 = 一份 preset：style + annotations）
+    + map_preset_versions（版本历史，做法2：实时自动保存原地更新，版本表只存检查点快照，留 3 版）。
+    幂等，startup 每次调用安全。"""
+    await database.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_map BOOLEAN NOT NULL DEFAULT FALSE;")
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS map_documents (
+          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name        TEXT NOT NULL DEFAULT '未命名地图',
+          preset      JSONB NOT NULL DEFAULT '{}',
+          thumb_path  TEXT DEFAULT '',
+          created_at  TIMESTAMPTZ DEFAULT NOW(),
+          updated_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute("CREATE INDEX IF NOT EXISTS idx_map_documents_user_id ON map_documents(user_id)")
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS map_preset_versions (
+          id          SERIAL PRIMARY KEY,
+          map_id      UUID NOT NULL REFERENCES map_documents(id) ON DELETE CASCADE,
+          preset      JSONB NOT NULL,
+          version     INTEGER NOT NULL,
+          note        TEXT DEFAULT '',
+          created_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    await database.execute(
+        "CREATE INDEX IF NOT EXISTS idx_map_preset_versions_map ON map_preset_versions(map_id, version DESC)"
+    )
 
 
 async def save_message(session_id, role, content, tokens_in=0, tokens_out=0, tokens_total=0) -> int:
@@ -438,7 +556,7 @@ async def get_user_today_tokens(user_id: int) -> int:
 
 async def get_all_users_with_stats() -> list:
     query = """
-        SELECT u.id, u.username, u.is_admin, u.can_write, u.max_daily_tokens, u.max_file_size_mb, u.created_at,
+        SELECT u.id, u.username, u.is_admin, u.can_write, u.can_draw, u.can_map, u.max_daily_tokens, u.max_file_size_mb, u.created_at,
                COUNT(DISTINCT CASE WHEN s.name IS NOT NULL THEN s.id END) AS session_count,
                COALESCE(SUM(m.tokens_total), 0) AS total_tokens,
                COALESCE(SUM(CASE WHEN DATE(m.created_at) = CURRENT_DATE THEN m.tokens_total ELSE 0 END), 0) AS today_tokens
@@ -585,6 +703,20 @@ async def update_user_writing_permission(user_id: int, can_write: bool) -> None:
     await database.execute(
         "UPDATE users SET can_write = :v WHERE id = :id",
         values={"v": can_write, "id": user_id}
+    )
+
+
+async def update_user_drawing_permission(user_id: int, can_draw: bool) -> None:
+    await database.execute(
+        "UPDATE users SET can_draw = :v WHERE id = :id",
+        values={"v": can_draw, "id": user_id}
+    )
+
+
+async def update_user_map_permission(user_id: int, can_map: bool) -> None:
+    await database.execute(
+        "UPDATE users SET can_map = :v WHERE id = :id",
+        values={"v": can_map, "id": user_id}
     )
 
 
@@ -1313,6 +1445,35 @@ async def delete_writing_section(section_id: str, task_id: str) -> bool:
     return row is not None
 
 
+async def get_writing_section_images(section_id: str) -> list[dict]:
+    rows = await database.fetch_all(
+        """SELECT id, section_id, marker_text, prompt, image_path, created_at, updated_at
+           FROM writing_section_images WHERE section_id = :sid ORDER BY created_at""",
+        values={"sid": section_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def upsert_writing_section_image_prompt(section_id: str, marker_text: str, prompt: str) -> None:
+    await database.execute(
+        """INSERT INTO writing_section_images (id, section_id, marker_text, prompt)
+           VALUES (:id, :sid, :marker, :prompt)
+           ON CONFLICT (section_id, marker_text)
+           DO UPDATE SET prompt = :prompt, updated_at = NOW()""",
+        values={"id": str(uuid.uuid4()), "sid": section_id, "marker": marker_text, "prompt": prompt},
+    )
+
+
+async def upsert_writing_section_image_file(section_id: str, marker_text: str, image_path: str) -> None:
+    await database.execute(
+        """INSERT INTO writing_section_images (id, section_id, marker_text, image_path)
+           VALUES (:id, :sid, :marker, :path)
+           ON CONFLICT (section_id, marker_text)
+           DO UPDATE SET image_path = :path, updated_at = NOW()""",
+        values={"id": str(uuid.uuid4()), "sid": section_id, "marker": marker_text, "path": image_path},
+    )
+
+
 async def update_style_skills(task_id: str, skills_text: str, source_text: str | None = None) -> bool:
     sets = ["style_skills = :skills", "style_skills_updated_at = NOW()", "updated_at = NOW()"]
     values: dict = {"tid": task_id, "skills": skills_text}
@@ -1367,3 +1528,452 @@ async def get_user_processed_files(user_id: int) -> list[str]:
         values={"uid": user_id},
     )
     return [r["filename"] for r in rows]
+
+
+# ---- 作图模块 ----
+
+def _decode_prompt_ids(raw) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return list(raw)
+
+
+async def create_drawing_style(user_id: int, name: str, prompt_ids: list[str] | None = None) -> str:
+    style_id = str(uuid.uuid4())
+    await database.execute(
+        """INSERT INTO drawing_styles (id, user_id, name, prompt_ids)
+           VALUES (:id, :uid, :name, CAST(:prompt_ids AS jsonb))""",
+        values={
+            "id": style_id,
+            "uid": user_id,
+            "name": name or "未命名风格",
+            "prompt_ids": json.dumps(prompt_ids or [], ensure_ascii=False),
+        },
+    )
+    return style_id
+
+
+async def get_drawing_styles(user_id: int) -> list[dict]:
+    rows = await database.fetch_all(
+        """SELECT id, name, created_at, updated_at
+           FROM drawing_styles WHERE user_id = :uid ORDER BY created_at DESC""",
+        values={"uid": user_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_drawing_style(style_id: str, user_id: int) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, user_id, name, prompt_ids, skill_package_id, created_at, updated_at
+           FROM drawing_styles WHERE id = :sid AND user_id = :uid""",
+        values={"sid": style_id, "uid": user_id},
+    )
+    if not row:
+        return None
+    style = dict(row)
+    style["prompt_ids"] = _decode_prompt_ids(style.get("prompt_ids"))
+    return style
+
+
+async def drawing_style_owned_by(style_id: str, user_id: int) -> bool:
+    row = await database.fetch_one(
+        "SELECT 1 FROM drawing_styles WHERE id = :sid AND user_id = :uid LIMIT 1",
+        values={"sid": style_id, "uid": user_id},
+    )
+    return row is not None
+
+
+async def update_drawing_style(style_id: str, user_id: int, **kwargs) -> bool:
+    allowed = {"name", "prompt_ids", "skill_package_id"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return False
+    sets = []
+    values = {"sid": style_id, "uid": user_id}
+    for key, value in fields.items():
+        if key == "prompt_ids":
+            sets.append(f"{key} = CAST(:{key} AS jsonb)")
+            values[key] = json.dumps(value or [], ensure_ascii=False)
+        else:
+            sets.append(f"{key} = :{key}")
+            values[key] = value
+    sets.append("updated_at = NOW()")
+    row = await database.fetch_one(
+        f"""UPDATE drawing_styles SET {', '.join(sets)}
+            WHERE id = :sid AND user_id = :uid RETURNING id""",
+        values=values,
+    )
+    return row is not None
+
+
+async def delete_drawing_style(style_id: str, user_id: int) -> bool:
+    row = await database.fetch_one(
+        "DELETE FROM drawing_styles WHERE id = :sid AND user_id = :uid RETURNING id",
+        values={"sid": style_id, "uid": user_id},
+    )
+    return row is not None
+
+
+async def create_drawing_prompt(name: str, content: str, created_by: int) -> str:
+    prompt_id = str(uuid.uuid4())
+    await database.execute(
+        """INSERT INTO drawing_prompts (id, name, content, created_by)
+           VALUES (:id, :name, :content, :uid)""",
+        values={"id": prompt_id, "name": name or "", "content": content or "", "uid": created_by},
+    )
+    return prompt_id
+
+
+async def get_drawing_prompts() -> list[dict]:
+    rows = await database.fetch_all(
+        "SELECT id, name, content, created_by, created_at FROM drawing_prompts ORDER BY created_at DESC"
+    )
+    return [dict(r) for r in rows]
+
+
+async def delete_drawing_prompt(prompt_id: str) -> bool:
+    row = await database.fetch_one(
+        "DELETE FROM drawing_prompts WHERE id = :pid RETURNING id",
+        values={"pid": prompt_id},
+    )
+    return row is not None
+
+
+async def update_drawing_prompt(prompt_id: str, **kwargs) -> bool:
+    allowed = {"name", "content"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return False
+    sets = ", ".join(f"{k} = :{k}" for k in fields)
+    row = await database.fetch_one(
+        f"UPDATE drawing_prompts SET {sets} WHERE id = :pid RETURNING id",
+        values={**fields, "pid": prompt_id},
+    )
+    return row is not None
+
+
+async def create_drawing_skill_package(name: str, source_url: str, instructions: str, created_by: int) -> str:
+    package_id = str(uuid.uuid4())
+    await database.execute(
+        """INSERT INTO drawing_skill_packages (id, name, source_url, instructions, created_by)
+           VALUES (:id, :name, :src, :ins, :uid)""",
+        values={
+            "id": package_id,
+            "name": name or "",
+            "src": source_url or "",
+            "ins": instructions or "",
+            "uid": created_by,
+        },
+    )
+    return package_id
+
+
+async def get_drawing_skill_packages() -> list[dict]:
+    rows = await database.fetch_all(
+        "SELECT id, name, source_url, kind, created_by, created_at FROM drawing_skill_packages ORDER BY created_at DESC"
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_drawing_skill_package(package_id: str) -> dict | None:
+    row = await database.fetch_one(
+        "SELECT id, name, source_url, kind, instructions, created_by, created_at "
+        "FROM drawing_skill_packages WHERE id = :pid",
+        values={"pid": package_id},
+    )
+    return dict(row) if row else None
+
+
+async def delete_drawing_skill_package(package_id: str) -> bool:
+    row = await database.fetch_one(
+        "DELETE FROM drawing_skill_packages WHERE id = :pid RETURNING id",
+        values={"pid": package_id},
+    )
+    return row is not None
+
+
+async def update_drawing_skill_package(package_id: str, **kwargs) -> bool:
+    allowed = {"name", "source_url", "instructions"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return False
+    sets = ", ".join(f"{k} = :{k}" for k in fields)
+    row = await database.fetch_one(
+        f"UPDATE drawing_skill_packages SET {sets} WHERE id = :pid RETURNING id",
+        values={**fields, "pid": package_id},
+    )
+    return row is not None
+
+
+async def create_drawing_generation(
+    style_id: str, user_id: int, user_input: str, full_prompt: str, parent_generation_id: str | None = None
+) -> str:
+    generation_id = str(uuid.uuid4())
+    await database.execute(
+        """INSERT INTO drawing_generations (id, style_id, user_id, user_input, full_prompt, status, parent_generation_id)
+           VALUES (:id, :sid, :uid, :input, :prompt, 'pending', :pid)""",
+        values={
+            "id": generation_id,
+            "sid": style_id,
+            "uid": user_id,
+            "input": user_input or "",
+            "prompt": full_prompt or "",
+            "pid": parent_generation_id,
+        },
+    )
+    return generation_id
+
+
+async def update_drawing_generation_result(
+    generation_id: str, *, status: str, image_path: str = "", model: str = "", error_msg: str = ""
+) -> None:
+    await database.execute(
+        """UPDATE drawing_generations
+           SET status = :status, image_path = :image_path, model = :model, error_msg = :error_msg
+           WHERE id = :gid""",
+        values={
+            "gid": generation_id,
+            "status": status,
+            "image_path": image_path,
+            "model": model,
+            "error_msg": error_msg,
+        },
+    )
+
+
+async def get_drawing_generations(style_id: str, limit: int = 50) -> list[dict]:
+    rows = await database.fetch_all(
+        """SELECT id, style_id, user_input, full_prompt, image_path, model, status, error_msg, created_at
+           FROM drawing_generations WHERE style_id = :sid
+           ORDER BY created_at DESC LIMIT :limit""",
+        values={"sid": style_id, "limit": limit},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_drawing_generation(generation_id: str) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, style_id, user_id, user_input, full_prompt, image_path, model, status, error_msg, created_at
+           FROM drawing_generations WHERE id = :gid""",
+        values={"gid": generation_id},
+    )
+    return dict(row) if row else None
+
+
+async def delete_drawing_generation(generation_id: str, user_id: int) -> dict | None:
+    row = await database.fetch_one(
+        "DELETE FROM drawing_generations WHERE id = :gid AND user_id = :uid RETURNING id, image_path",
+        values={"gid": generation_id, "uid": user_id},
+    )
+    return dict(row) if row else None
+
+
+async def get_drawing_generation_tips(style_id: str, limit: int = 50) -> list[dict]:
+    """每条编辑历史链的最新一步（没有任何行以它为 parent 的行），供折叠画廊列表用。"""
+    rows = await database.fetch_all(
+        """SELECT g.id, g.style_id, g.user_input, g.full_prompt, g.image_path, g.model,
+                  g.status, g.error_msg, g.parent_generation_id, g.created_at
+           FROM drawing_generations g
+           WHERE g.style_id = :sid
+             AND NOT EXISTS (SELECT 1 FROM drawing_generations c WHERE c.parent_generation_id = g.id)
+           ORDER BY g.created_at DESC LIMIT :limit""",
+        values={"sid": style_id, "limit": limit},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_drawing_generation_lineage(generation_id: str, user_id: int) -> list[dict]:
+    """给定链上任意一个节点（通常是叶子），沿 parent_generation_id 回溯到根，按时间正序返回整条链。"""
+    rows = await database.fetch_all(
+        """WITH RECURSIVE chain AS (
+               SELECT * FROM drawing_generations WHERE id = :gid AND user_id = :uid
+               UNION ALL
+               SELECT g.* FROM drawing_generations g
+               JOIN chain c ON g.id = c.parent_generation_id
+           )
+           SELECT id, style_id, user_input, full_prompt, image_path, model, status, error_msg,
+                  parent_generation_id, created_at
+           FROM chain ORDER BY created_at ASC""",
+        values={"gid": generation_id, "uid": user_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def delete_drawing_generation_step(generation_id: str, user_id: int) -> dict | None:
+    """删除链上单独一步：把它的子节点接到它的父节点上，保留链的其余部分。"""
+    async with database.transaction():
+        row = await database.fetch_one(
+            "SELECT id, parent_generation_id, image_path FROM drawing_generations WHERE id = :gid AND user_id = :uid",
+            values={"gid": generation_id, "uid": user_id},
+        )
+        if not row:
+            return None
+        await database.execute(
+            "UPDATE drawing_generations SET parent_generation_id = :new_parent WHERE parent_generation_id = :gid",
+            values={"new_parent": row["parent_generation_id"], "gid": generation_id},
+        )
+        deleted = await database.fetch_one(
+            "DELETE FROM drawing_generations WHERE id = :gid AND user_id = :uid RETURNING id, image_path",
+            values={"gid": generation_id, "uid": user_id},
+        )
+        return dict(deleted) if deleted else None
+
+
+async def delete_drawing_generation_lineage(generation_id: str, user_id: int) -> list[str] | None:
+    """删除整条编辑历史链：定位到根节点后删除，ON DELETE CASCADE 级联清空所有子孙。
+    返回全部被删行的 image_path（供路由层清理磁盘文件），lineage 不存在/不属于该用户时返回 None
+    （区别于"删除成功但没有任何图片文件"的正常空列表，供路由层区分 404 和成功）。"""
+    chain = await get_drawing_generation_lineage(generation_id, user_id)
+    if not chain:
+        return None
+    root_id = chain[0]["id"]
+    await database.execute(
+        "DELETE FROM drawing_generations WHERE id = :rid AND user_id = :uid",
+        values={"rid": root_id, "uid": user_id},
+    )
+    return [c["image_path"] for c in chain if c.get("image_path")]
+
+
+# ============================ 地图模块 ============================
+# 一张地图 = map_documents 一行，preset(JSONB) = { style:{…}, annotations:{points,links} }。
+# preset 实时防抖 PATCH 原地更新；版本历史见 map_preset_versions（留最近 3 版）。
+_MAP_VERSIONS_KEEP = 3
+
+
+def _as_json(value) -> str:
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+async def create_map_document(user_id: int, name: str, preset: dict | None = None) -> str:
+    map_id = str(uuid.uuid4())
+    await database.execute(
+        """INSERT INTO map_documents (id, user_id, name, preset)
+           VALUES (:id, :uid, :name, CAST(:preset AS JSONB))""",
+        values={"id": map_id, "uid": user_id, "name": name or "未命名地图",
+                "preset": _as_json(preset or {})},
+    )
+    return map_id
+
+
+async def get_map_documents(user_id: int) -> list[dict]:
+    rows = await database.fetch_all(
+        """SELECT id, name, thumb_path, created_at, updated_at
+           FROM map_documents WHERE user_id = :uid ORDER BY updated_at DESC""",
+        values={"uid": user_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_map_document(map_id: str, user_id: int) -> dict | None:
+    row = await database.fetch_one(
+        """SELECT id, user_id, name, preset, thumb_path, created_at, updated_at
+           FROM map_documents WHERE id = :id AND user_id = :uid""",
+        values={"id": map_id, "uid": user_id},
+    )
+    if not row:
+        return None
+    d = dict(row)
+    if isinstance(d.get("preset"), str):
+        d["preset"] = json.loads(d["preset"] or "{}")
+    return d
+
+
+async def map_document_owned_by(map_id: str, user_id: int) -> bool:
+    row = await database.fetch_one(
+        "SELECT 1 FROM map_documents WHERE id = :id AND user_id = :uid",
+        values={"id": map_id, "uid": user_id},
+    )
+    return row is not None
+
+
+async def update_map_document(map_id: str, user_id: int, *, name: str | None = None,
+                              preset: dict | None = None) -> bool:
+    sets, values = ["updated_at = NOW()"], {"id": map_id, "uid": user_id}
+    if name is not None:
+        sets.append("name = :name")
+        values["name"] = name
+    if preset is not None:
+        sets.append("preset = CAST(:preset AS JSONB)")
+        values["preset"] = _as_json(preset)
+    if len(sets) == 1:
+        return False
+    result = await database.execute(
+        f"UPDATE map_documents SET {', '.join(sets)} WHERE id = :id AND user_id = :uid",
+        values=values,
+    )
+    return True
+
+
+async def delete_map_document(map_id: str, user_id: int) -> dict | None:
+    row = await database.fetch_one(
+        "DELETE FROM map_documents WHERE id = :id AND user_id = :uid RETURNING id, thumb_path",
+        values={"id": map_id, "uid": user_id},
+    )
+    return dict(row) if row else None
+
+
+async def set_map_thumb(map_id: str, user_id: int, thumb_path: str) -> None:
+    await database.execute(
+        "UPDATE map_documents SET thumb_path = :p WHERE id = :id AND user_id = :uid",
+        values={"p": thumb_path, "id": map_id, "uid": user_id},
+    )
+
+
+async def list_map_versions(map_id: str) -> list[dict]:
+    rows = await database.fetch_all(
+        """SELECT id, version, note, created_at FROM map_preset_versions
+           WHERE map_id = :mid ORDER BY version DESC""",
+        values={"mid": map_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_map_version(map_id: str, version: int) -> dict | None:
+    row = await database.fetch_one(
+        "SELECT id, version, note, preset, created_at FROM map_preset_versions WHERE map_id = :mid AND version = :v",
+        values={"mid": map_id, "v": version},
+    )
+    if not row:
+        return None
+    d = dict(row)
+    if isinstance(d.get("preset"), str):
+        d["preset"] = json.loads(d["preset"] or "{}")
+    return d
+
+
+async def snapshot_map_version(map_id: str, preset: dict, note: str = "checkpoint") -> int:
+    """把给定 preset 存为一个新版本快照；超过 _MAP_VERSIONS_KEEP 版时删最旧。返回新版本号。"""
+    row = await database.fetch_one(
+        "SELECT COALESCE(MAX(version), 0) AS v FROM map_preset_versions WHERE map_id = :mid",
+        values={"mid": map_id},
+    )
+    next_version = int(row["v"]) + 1
+    await database.execute(
+        """INSERT INTO map_preset_versions (map_id, preset, version, note)
+           VALUES (:mid, CAST(:preset AS JSONB), :v, :note)""",
+        values={"mid": map_id, "preset": _as_json(preset), "v": next_version, "note": note},
+    )
+    old = await database.fetch_all(
+        """SELECT version FROM map_preset_versions WHERE map_id = :mid
+           ORDER BY version DESC OFFSET :keep""",
+        values={"mid": map_id, "keep": _MAP_VERSIONS_KEEP},
+    )
+    for r in old:
+        await database.execute(
+            "DELETE FROM map_preset_versions WHERE map_id = :mid AND version = :v",
+            values={"mid": map_id, "v": r["version"]},
+        )
+    return next_version
+
+
+async def latest_map_version_preset(map_id: str) -> dict | None:
+    row = await database.fetch_one(
+        "SELECT preset FROM map_preset_versions WHERE map_id = :mid ORDER BY version DESC LIMIT 1",
+        values={"mid": map_id},
+    )
+    if not row:
+        return None
+    p = row["preset"]
+    return p if isinstance(p, dict) else json.loads(p)

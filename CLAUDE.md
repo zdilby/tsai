@@ -16,6 +16,8 @@ uvicorn main:app --reload
 gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 ```
 
+The port shown above (`8000`) is just an example — bind to whatever port is free/expected on the host (e.g. append `--port 8080` to the dev command, or change the `--bind` port for gunicorn). Nothing in the app logic is tied to a specific port; on this machine local testing commonly uses `8080` or `8000` interchangeably.
+
 ## Database Setup
 
 The DB schema is defined in `backend/db.py:init_db()`. It is **not** called automatically on startup (the call is commented out in `main.py`). Run it manually once:
@@ -80,3 +82,7 @@ Sessions have two states: **null** (no `name`, created automatically on `GET /`)
 ### pgvector Access Pattern
 
 The `databases` library does not support pgvector natively. Raw asyncpg connection is acquired from `database._backend._pool` and `register_vector(conn)` is called before every vector read/write.
+
+## Browser Verification (claude-in-chrome)
+
+When using the `claude-in-chrome` tool to visually verify changes in this project, cap retry attempts at 3. If 3 consecutive attempts fail (extension not connected, dialog-blocked renderer, safety-classifier timeouts, etc.), stop calling the tool and fall back to other verification methods (curl, direct DB checks, reading source) rather than continuing to retry.

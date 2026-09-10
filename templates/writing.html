@@ -7,7 +7,7 @@
     <meta name="description" content="AI by Tianshu">
     <link rel="icon" href="/static/images/favicon.png">
     <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=5">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
     <style>
@@ -120,11 +120,14 @@
             flex-shrink: 0;
             padding: 14px 12px 1.5em;
             display: flex;
+            flex-wrap: wrap;
             justify-content: center;
             gap: 8px;
         }
         .writing-sidebar-actions .btn {
             border-radius: 4px;
+            white-space: nowrap;
+            flex-shrink: 0;
         }
         #writing-main {
             display: flex;
@@ -639,6 +642,130 @@
             line-height: 1;
         }
         .section-expand-toggle:hover { color: #5c6bc0; }
+
+        /* ---- Image-edit portal: mirrors #section-edit-portal/.section-edit-card above ---- */
+        #image-edit-portal {
+            position: absolute;
+            z-index: 5;
+        }
+        .image-edit-card {
+            box-sizing: border-box;
+            width: 100%;
+            min-height: 550px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #c5cae9;
+            border-radius: 8px;
+            background: #fff;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+        }
+        .image-edit-window-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 8px 10px;
+            border-bottom: 1px solid #e8eaf6;
+            background: #f5f6ff;
+            flex-shrink: 0;
+            border-radius: 8px 8px 0 0;
+        }
+        .image-edit-tab {
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+        }
+        .image-edit-close {
+            font-size: 18px;
+            color: #9e9e9e;
+            cursor: pointer;
+            line-height: 1;
+        }
+        .image-edit-close:hover { color: #5c6bc0; }
+        .image-edit-window-body {
+            display: flex;
+            flex-direction: column;
+        }
+        #image-edit-prompt-panel, #image-edit-upload-panel {
+            display: flex;
+            flex-direction: column;
+        }
+        #image-edit-prompt-panel {
+            position: relative;
+        }
+        .image-edit-prompt-mask {
+            position: absolute;
+            inset: 0;
+            background: rgba(255,255,255,0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            color: #5c6bc0;
+            font-weight: 600;
+            z-index: 2;
+            border-radius: 4px;
+        }
+        #image-edit-prompt-textarea {
+            width: 100%;
+            min-height: 460px;
+            border: none;
+            outline: none;
+            resize: none;
+            padding: 10px 14px;
+            font-size: 14px;
+            font-family: 'Courier New', monospace;
+            line-height: 1.7;
+            color: #333;
+            box-sizing: border-box;
+            overflow-y: hidden;
+        }
+        .image-edit-upload-preview {
+            min-height: 460px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 14px;
+            box-sizing: border-box;
+        }
+        .image-edit-upload-preview-img {
+            max-width: 100%;
+            height: auto;
+        }
+        .image-edit-upload-empty {
+            font-size: 13px;
+            color: #bdbdbd;
+        }
+        .image-edit-actions {
+            flex-shrink: 0;
+            display: flex;
+            justify-content: flex-end;
+            gap: 4px;
+            padding: 8px 10px;
+            border-top: 1px solid #f0f0f0;
+        }
+        .image-edit-actions button {
+            padding: 0 8px;
+            font-size: 12px;
+            height: 26px;
+            line-height: 26px;
+        }
+        .image-line-icon, .image-line-eye {
+            font-size: 18px;
+            color: #9e9e9e;
+            cursor: pointer;
+            line-height: 1;
+            vertical-align: middle;
+            margin-left: 2px;
+        }
+        .image-line-icon:hover, .image-line-eye:hover { color: #5c6bc0; }
+        .section-image-inline {
+            max-width: 100%;
+            display: block;
+            border-radius: 4px;
+            margin: 4px 0;
+        }
+
         .section-sub-outline {
             font-size: 12px;
             color: #9e9e9e;
@@ -665,9 +792,10 @@
     <li class="brand-logo center" style="flex-shrink:0;">TSAI</li>
     <li style="flex:1;"></li>
     <li style="flex-shrink:0;border-top:1px solid #eee;">
-        <div style="display:flex;justify-content:center;gap:8px;padding:14px 12px 20px;">
-            <button id="btn-new-writing-nav" class="btn waves-effect waves-light" type="button" style="border-radius:4px;background-color:#e57373e6;">新建写作</button>
-            <a class="btn indigo waves-effect waves-light" href="/" style="border-radius:4px;">进入对话</a>
+        <div style="display:flex;justify-content:center;gap:8px;padding:14px 12px 20px;flex-wrap:wrap;">
+            <button id="btn-new-writing-nav" class="btn waves-effect waves-light" type="button" style="border-radius:4px;background-color:#e57373e6;white-space:nowrap;flex-shrink:0;"><span class="btn-label-lg">新建写作</span></button>
+            {% set ms_current = 'writing' %}{% set ms_dd_id = 'module-dd-writing-m' %}
+            {% include '_module_switch.html' %}
         </div>
     </li>
 </ul>
@@ -677,8 +805,9 @@
         <p class="writing-empty center-align">还没有写作任务，点击下方按钮新建</p>
     </div>
     <div class="writing-sidebar-actions">
-        <button id="btn-new-writing" class="btn waves-effect waves-light" type="button" style="background-color:#e57373e6;">新建写作</button>
-        <button id="btn-go-chat" class="btn indigo waves-effect waves-light" type="button">进入对话</button>
+        <button id="btn-new-writing" class="btn waves-effect waves-light" type="button" style="background-color:#e57373e6;"><span class="btn-label-lg">新建写作</span></button>
+        {% set ms_current = 'writing' %}{% set ms_dd_id = 'module-dd-writing-d' %}
+        {% include '_module_switch.html' %}
     </div>
 </div>
 <div class="writing-shell">
@@ -710,6 +839,7 @@
                 <textarea id="content-textarea" style="display:none"></textarea>
                 <div id="sections-container"></div>
                 <div id="section-edit-portal" style="display:none"></div>
+                <div id="image-edit-portal" style="display:none"></div>
                 <div id="content-empty" class="content-empty-hint">
                     {% if task_id %}
                     内容加载中...
@@ -937,6 +1067,18 @@
     </div>
 </div>
 
+<div id="modal-regen-image-prompt" class="modal" style="max-width:420px">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>重新生成 Prompt</h5>
+        <p>新 Prompt 将覆盖旧内容</p>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="btn-confirm-regen-image-prompt" class="waves-effect waves-green btn-flat">确定</a>
+    </div>
+</div>
+
 <script src="/static/js/jquery/jquery-3.6.4.min.js"></script>
 <script src="/static/materialize/js/materialize.min.js"></script>
 <script src="/static/js/base.js"></script>
@@ -965,6 +1107,14 @@
     // always for the currently expanded section (editing requires the section to be expanded first).
     // draftContent only reaches the real writing_sections row via "替换原文" (replaceSectionWithDraft).
     let sectionDraftEdit = null;
+    // { [sectionId]: [{marker_text, prompt, image_url}] } — fetched once when a section expands.
+    let sectionImages = {};
+    // { [sectionId]: Set<markerText> } — eye-icon "currently showing image" toggle, pure UI state,
+    // never persisted, resets on reload.
+    let visibleMarkerImages = {};
+    // { sectionId, markerText, tab: 'prompt'|'upload', draftPrompt, imageUrl } | null — mirrors
+    // sectionDraftEdit but for the image-edit side panel; the two are mutually exclusive.
+    let sectionImageEdit = null;
     let taskTimestamps = {outline_updated_at: null, toc_updated_at: null};
     let viewMode = 'article'; // 'article' | 'sections'
     let settingsDirty = false;
@@ -1253,16 +1403,23 @@
                 sectionDraftEdit = null;
             }
         }
-        container.classList.toggle('split-active', !!sectionDraftEdit);
+        if (sectionImageEdit) {
+            const sec = sections.find(s => s.id === sectionImageEdit.sectionId);
+            if (!sec || sec.id !== expandedSectionId) {
+                sectionImageEdit = null;
+            }
+        }
+        container.classList.toggle('split-active', !!sectionDraftEdit || !!sectionImageEdit);
 
         container.innerHTML = sections.map((sec, i) => {
             const statusClass = sec.status || 'pending';
             const hasContent = !!(sec.content && sec.content.trim());
             const stale = isSectionStale(sec);
             const isExpanded = hasContent && sec.id === expandedSectionId;
-            const contentHtml = hasContent
+            let contentHtml = hasContent
                 ? DOMPurify.sanitize(marked.parse(sec.content))
                 : '<span style="color:#bdbdbd;font-size:13px">（尚未生成内容）</span>';
+            if (hasContent) contentHtml = injectImageMarkerIcons(contentHtml, sec.id);
             const subOutlineHtml = sec.sub_outline
                 ? `<div class="section-sub-outline">${escHtml(sec.sub_outline)}</div>`
                 : '';
@@ -1278,7 +1435,8 @@
                 ? `<div class="section-content-footer">${wcTargetHtml}${expandToggleHtml}</div>`
                 : '';
 
-            const editWindowOpen = !!sectionDraftEdit && sectionDraftEdit.sectionId === sec.id;
+            const editWindowOpen = (!!sectionDraftEdit && sectionDraftEdit.sectionId === sec.id)
+                || (!!sectionImageEdit && sectionImageEdit.sectionId === sec.id);
             let editBtnTitle;
             if (sec.id !== expandedSectionId) editBtnTitle = '请先放大该段落再编辑';
             else if (sec.status === 'confirmed') editBtnTitle = '请先取消确认才能编辑';
@@ -1316,6 +1474,35 @@
         </div>`;
 
         renderSectionEditPortal();
+        renderImageEditPortal();
+    }
+
+    // Finds `[配图：xxx]`/`[配图:xxx]` markers in already-sanitized section HTML and appends
+    // interactive icons after each: an "edit" icon always, plus an "eye" icon once that marker
+    // has a saved image — or, when the eye toggle is on, swaps the marker text for the image
+    // itself. Runs after DOMPurify, so the icon markup we inject here (onclick/data-* included)
+    // is never at risk of being stripped — we control every byte of it, unlike sec.content.
+    function injectImageMarkerIcons(html, sectionId) {
+        const showIcons = sectionId === expandedSectionId && !sectionDraftEdit && !sectionImageEdit;
+        const rows = sectionImages[sectionId] || [];
+        const visible = visibleMarkerImages[sectionId] || new Set();
+        return html.replace(/\[配图[：:]([^\]]*)\]/g, (match, markerText) => {
+            const trimmed = markerText.trim();
+            const row = rows.find(r => r.marker_text === trimmed);
+            if (showIcons && visible.has(trimmed) && row && row.image_url) {
+                return `<img class="section-image-inline" src="${row.image_url}" alt="配图">` +
+                    `<i class="material-icons image-line-eye" data-section="${sectionId}" data-marker="${escHtml(trimmed)}" ` +
+                    `onclick="toggleMarkerImageViewFromIcon(this,event)" title="切换回文字">visibility_off</i>`;
+            }
+            if (!showIcons) return match;
+            const editIcon = `<i class="material-icons image-line-icon" data-section="${sectionId}" data-marker="${escHtml(trimmed)}" ` +
+                `onclick="openImageEditWindowFromIcon(this,event)" title="图片编辑">image</i>`;
+            const eyeIcon = (row && row.image_url)
+                ? `<i class="material-icons image-line-eye" data-section="${sectionId}" data-marker="${escHtml(trimmed)}" ` +
+                  `onclick="toggleMarkerImageViewFromIcon(this,event)" title="显示图片">visibility</i>`
+                : '';
+            return `${match}${editIcon}${eyeIcon}`;
+        });
     }
 
     // ---- Section draft-edit portal: positioned outside #sections-container so the pair
@@ -1406,6 +1593,260 @@
         portal.style.height = cardRect.height + 'px';
     }
 
+    // ---- Image-edit portal: structurally mirrors the section draft-edit portal above
+    // (same positioning approach, same portal-outside-the-list layout trick), but for
+    // a single "[配图：xxx]" marker inside the expanded section instead of the whole
+    // section body. Mutually exclusive with sectionDraftEdit (enforced in renderSectionsContent
+    // and toggleSectionExpand). ----
+
+    function closeImageEditPortal() {
+        const portal = document.getElementById('image-edit-portal');
+        portal.style.display = 'none';
+        portal.innerHTML = '';
+        const listContainer = document.getElementById('sections-container');
+        if (listContainer) listContainer.style.marginLeft = '';
+        window.removeEventListener('resize', positionImageEditPortal);
+    }
+
+    function renderImageEditPortal() {
+        const portal = document.getElementById('image-edit-portal');
+        if (!sectionImageEdit || viewMode !== 'sections') {
+            portal.style.display = 'none';
+            if (!sectionImageEdit) closeImageEditPortal();
+            return;
+        }
+        const sec = sections.find(s => s.id === sectionImageEdit.sectionId);
+        if (!sec) { closeImageEditPortal(); return; }
+
+        const sid = sec.id;
+        const tab = sectionImageEdit.tab;
+        const promptColor = tab === 'prompt' ? '#303F9F' : '#343434';
+        const uploadColor = tab === 'upload' ? '#303F9F' : '#343434';
+        const preview = sectionImageEdit.imageUrl
+            ? `<img class="image-edit-upload-preview-img" src="${sectionImageEdit.imageUrl}" alt="已上传图片">`
+            : `<span class="image-edit-upload-empty">尚未上传图片</span>`;
+
+        portal.innerHTML = `
+        <div class="image-edit-card">
+            <div class="image-edit-window-header">
+                <span style="font-size:12px;color:#8d6e63;flex:1">图片编辑</span>
+                <span class="image-edit-tab" style="color:${promptColor}" onclick="switchImageEditTab('prompt')">Prompt</span>
+                <span class="image-edit-tab" style="color:${uploadColor}" onclick="switchImageEditTab('upload')">上传图片</span>
+                <i class="material-icons image-edit-close" onclick="closeImageEditWindow()" title="关闭">close</i>
+            </div>
+            <div class="image-edit-window-body">
+                <div id="image-edit-prompt-panel" style="${tab === 'prompt' ? '' : 'display:none'}">
+                    <textarea id="image-edit-prompt-textarea" oninput="syncImageDraftPrompt()" ${sectionImageEdit.busy ? 'disabled' : ''}>${escHtml(sectionImageEdit.draftPrompt || '')}</textarea>
+                    <div class="image-edit-actions">
+                        <button id="btn-generate-image-prompt" class="btn-flat waves-effect" onclick="generateImagePrompt()" ${sectionImageEdit.busy ? 'disabled' : ''}>生成Prompt</button>
+                        <button class="btn-flat waves-effect indigo-text text-darken-2" onclick="saveImagePrompt('${sid}')" ${sectionImageEdit.busy ? 'disabled' : ''}>保存</button>
+                        <button class="btn-flat waves-effect" onclick="closeImageEditWindow()" ${sectionImageEdit.busy ? 'disabled' : ''}>取消</button>
+                    </div>
+                    ${sectionImageEdit.busy ? `<div class="image-edit-prompt-mask">${escHtml(sectionImageEdit.busyLabel || '处理中...')}</div>` : ''}
+                </div>
+                <div id="image-edit-upload-panel" style="${tab === 'upload' ? '' : 'display:none'}">
+                    <div class="image-edit-upload-preview">${preview}</div>
+                    <input type="file" id="image-edit-file-input" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="handleImageUpload(event)">
+                    <div class="image-edit-actions">
+                        <button class="btn-flat waves-effect" onclick="document.getElementById('image-edit-file-input').click()">上传图片</button>
+                        <button class="btn-flat waves-effect indigo-text text-darken-2" onclick="M.toast({html:'图片已在上传时自动保存', classes:'indigo'})">保存</button>
+                        <button class="btn-flat waves-effect" onclick="closeImageEditWindow()">取消</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+        portal.style.display = 'block';
+        window.addEventListener('resize', positionImageEditPortal);
+        requestAnimationFrame(() => {
+            // Position first — it's what gives the portal its width. Measuring the textarea's
+            // scrollHeight before that (e.g. the very first time the portal is ever shown, when
+            // it has no explicit width yet from a prior positioning) lets it shrink-wrap to an
+            // indeterminate width, wrap into far more lines than it should, and read a
+            // scrollHeight in the thousands of px.
+            positionImageEditPortal();
+            // Only measure while the prompt textarea is actually visible — scrollHeight reads 0
+            // on a display:none element, which would wrongly collapse the textarea's stored height.
+            if (tab === 'prompt') autoResizeImagePromptTextarea();
+        });
+    }
+
+    // Plain <textarea> (not Materialize's) has no native auto-grow, so the panel's
+    // "expand height as content grows" requirement is done by hand: measure natural
+    // content height and apply it directly, on every input keystroke and after any
+    // programmatic value change (generate-prompt result, initial fill on open).
+    function autoResizeImagePromptTextarea() {
+        const ta = document.getElementById('image-edit-prompt-textarea');
+        if (!ta) return;
+        ta.style.height = 'auto';
+        ta.style.height = ta.scrollHeight + 'px';
+    }
+
+    function syncImageDraftPrompt() {
+        if (!sectionImageEdit) return;
+        const ta = document.getElementById('image-edit-prompt-textarea');
+        if (ta) sectionImageEdit.draftPrompt = ta.value;
+        autoResizeImagePromptTextarea();
+    }
+
+    function positionImageEditPortal() {
+        if (!sectionImageEdit) return;
+        const portal = document.getElementById('image-edit-portal');
+        const card = document.getElementById('section-card-' + sectionImageEdit.sectionId);
+        const listContainer = document.getElementById('sections-container');
+        const area = document.getElementById('content-area');
+        if (!portal || !card || !listContainer || !area) return;
+        const gap = 16;
+
+        listContainer.style.marginLeft = '0px';
+        const areaRect = area.getBoundingClientRect();
+        const containerWidth = listContainer.getBoundingClientRect().width;
+        const cardWidthNow = card.getBoundingClientRect().width;
+        const pairWidth = containerWidth + gap + cardWidthNow;
+        const offset = Math.max(0, (areaRect.width - pairWidth) / 2);
+        listContainer.style.marginLeft = offset + 'px';
+
+        // Height is deliberately NOT mirrored from the card — the image-edit panel has its
+        // own independent floor (550px, via .image-edit-card { min-height }) and grows with
+        // its own content (generated prompt length, uploaded image size), unrelated to how
+        // tall the paragraph preview happens to be.
+        const cardRect = card.getBoundingClientRect();
+        portal.style.top = (cardRect.top - areaRect.top + area.scrollTop) + 'px';
+        portal.style.left = (cardRect.right - areaRect.left + area.scrollLeft + gap) + 'px';
+        portal.style.width = cardRect.width + 'px';
+    }
+
+    function openImageEditWindowFromIcon(el, event) {
+        if (event) event.stopPropagation();
+        openImageEditWindow(el.dataset.section, el.dataset.marker);
+    }
+
+    function openImageEditWindow(sectionId, markerText) {
+        const sec = sections.find(s => s.id === sectionId);
+        if (!sec || sec.id !== expandedSectionId || sectionDraftEdit || sectionImageEdit) return;
+        const existing = (sectionImages[sectionId] || []).find(r => r.marker_text === markerText);
+        sectionImageEdit = {
+            sectionId, markerText, tab: 'prompt',
+            draftPrompt: (existing && existing.prompt) || '',
+            imageUrl: (existing && existing.image_url) || null,
+            busy: false, busyLabel: '',
+        };
+        renderSectionsContent();
+    }
+
+    function switchImageEditTab(tab) {
+        if (!sectionImageEdit) return;
+        syncImageDraftPrompt();
+        sectionImageEdit.tab = tab;
+        renderImageEditPortal();
+    }
+
+    function closeImageEditWindow() {
+        sectionImageEdit = null;
+        renderSectionsContent();
+    }
+
+    let _pendingRegenSectionImage = null;
+    async function generateImagePrompt() {
+        if (!sectionImageEdit) return;
+        syncImageDraftPrompt();
+        if ((sectionImageEdit.draftPrompt || '').trim()) {
+            _pendingRegenSectionImage = sectionImageEdit;
+            const el = document.getElementById('modal-regen-image-prompt');
+            (M.Modal.getInstance(el) || M.Modal.init(el)).open();
+            return;
+        }
+        await doGenerateImagePrompt();
+    }
+
+    async function doGenerateImagePrompt() {
+        if (!sectionImageEdit || sectionImageEdit.busy) return;
+        const { sectionId, markerText } = sectionImageEdit;
+        // Shared "busy" flag with the AI-chat image-prompt flow (see sendMessage()) — the
+        // Gemini call this hits routinely takes several seconds, and using one flag for both
+        // operations keeps them mutually exclusive without two locks that don't know about
+        // each other. renderImageEditPortal() reads it to disable+mask the panel declaratively.
+        sectionImageEdit.busy = true;
+        sectionImageEdit.busyLabel = '生成中...';
+        renderImageEditPortal();
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}/images/generate-prompt`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({marker_text: markerText}),
+            });
+            if (!r.ok) throw new Error((await r.json()).detail || '生成失败');
+            const data = await r.json();
+            if (!sectionImageEdit || sectionImageEdit.sectionId !== sectionId || sectionImageEdit.markerText !== markerText) return;
+            sectionImageEdit.draftPrompt = data.prompt;
+        } catch (e) {
+            M.toast({html: '生成失败：' + e.message, classes: 'red'});
+        } finally {
+            if (sectionImageEdit && sectionImageEdit.sectionId === sectionId && sectionImageEdit.markerText === markerText) {
+                sectionImageEdit.busy = false;
+                renderImageEditPortal();
+            }
+        }
+    }
+
+    async function saveImagePrompt(sectionId) {
+        if (!sectionImageEdit || sectionImageEdit.sectionId !== sectionId) return;
+        syncImageDraftPrompt();
+        const { markerText, draftPrompt } = sectionImageEdit;
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}/images`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({marker_text: markerText, prompt: draftPrompt}),
+            });
+            if (!r.ok) throw new Error((await r.json()).detail || '保存失败');
+            const rows = sectionImages[sectionId] || (sectionImages[sectionId] = []);
+            const row = rows.find(x => x.marker_text === markerText);
+            if (row) row.prompt = draftPrompt;
+            else rows.push({marker_text: markerText, prompt: draftPrompt, image_url: null});
+            M.toast({html: 'Prompt 已保存', classes: 'indigo'});
+        } catch (e) {
+            M.toast({html: '保存失败：' + e.message, classes: 'red'});
+        }
+    }
+
+    async function handleImageUpload(event) {
+        const fileInput = event.target;
+        const file = fileInput.files[0];
+        fileInput.value = '';
+        if (!file || !sectionImageEdit) return;
+        const { sectionId, markerText } = sectionImageEdit;
+        try {
+            const formData = new FormData();
+            formData.append('marker_text', markerText);
+            formData.append('file', file);
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}/images/upload`, {
+                method: 'POST', body: formData,
+            });
+            if (!r.ok) throw new Error((await r.json()).detail || '上传失败');
+            const data = await r.json();
+            if (!sectionImageEdit || sectionImageEdit.sectionId !== sectionId || sectionImageEdit.markerText !== markerText) return;
+            sectionImageEdit.imageUrl = data.image_url;
+            const rows = sectionImages[sectionId] || (sectionImages[sectionId] = []);
+            const row = rows.find(x => x.marker_text === markerText);
+            if (row) row.image_url = data.image_url;
+            else rows.push({marker_text: markerText, prompt: '', image_url: data.image_url});
+            renderImageEditPortal();
+            M.toast({html: '图片已上传', classes: 'indigo'});
+        } catch (e) {
+            M.toast({html: '上传失败：' + e.message, classes: 'red'});
+        }
+    }
+
+    function toggleMarkerImageViewFromIcon(el, event) {
+        if (event) event.stopPropagation();
+        const sectionId = el.dataset.section;
+        const markerText = el.dataset.marker;
+        const set = visibleMarkerImages[sectionId] || (visibleMarkerImages[sectionId] = new Set());
+        if (set.has(markerText)) set.delete(markerText);
+        else set.add(markerText);
+        renderSectionsContent();
+    }
+
     function toggleSectionCard(sectionId) {
         const body = document.getElementById('section-body-' + sectionId);
         if (body) body.style.display = body.style.display === 'none' ? '' : 'none';
@@ -1420,7 +1861,26 @@
         if (sectionDraftEdit && sectionDraftEdit.sectionId !== expandedSectionId) {
             sectionDraftEdit = null;
         }
+        if (sectionImageEdit && sectionImageEdit.sectionId !== expandedSectionId) {
+            sectionImageEdit = null;
+        }
         renderSectionsContent();
+        // Expand itself renders instantly; the eye-icons for markers with a saved image
+        // fade in a beat later once this resolves, rather than blocking the expand animation
+        // on a network round-trip.
+        if (expandedSectionId && !sectionImages[expandedSectionId]) {
+            loadSectionImages(expandedSectionId);
+        }
+    }
+
+    async function loadSectionImages(sectionId) {
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}/images`);
+            sectionImages[sectionId] = r.ok ? await r.json() : [];
+        } catch (_) {
+            sectionImages[sectionId] = [];
+        }
+        if (sectionId === expandedSectionId) renderSectionsContent();
     }
 
     async function generateSection(sectionId) {
@@ -1535,6 +1995,7 @@
         // A section's draft-edit window is sections-view-only — hide it (state stays intact
         // in sectionDraftEdit) rather than let it float over the full-article view.
         document.getElementById('section-edit-portal').style.display = 'none';
+        document.getElementById('image-edit-portal').style.display = 'none';
         const preview = document.getElementById('content-preview');
         const empty = document.getElementById('content-empty');
         if (currentContent) {
@@ -1558,6 +2019,7 @@
         sc.style.display = 'block';
         // Re-show and reposition an edit window left open from before switching away.
         if (sectionDraftEdit) renderSectionEditPortal();
+        if (sectionImageEdit) renderImageEditPortal();
         updateViewToggle();
         updateEditArticleButtonVisibility();
     }
@@ -1801,42 +2263,75 @@
             const msg = input.value.trim();
             if (!msg || !chatSessionId) return;
 
-            let sectionId = null;
-            if (viewMode === 'sections') {
+            // Three-tier scope: an open image-edit panel on the Prompt tab with a non-empty
+            // draft takes priority over the expanded section, which takes priority over the
+            // whole document. This lets "AI 对话" retarget to the image prompt currently being
+            // edited without opening a separate conversation thread.
+            let target = { type: 'whole' };
+            if (sectionImageEdit && sectionImageEdit.tab === 'prompt' && (sectionImageEdit.draftPrompt || '').trim()) {
+                if (sectionImageEdit.busy) {
+                    M.toast({html: 'Prompt 正在处理中，请稍后再发送', classes: 'orange'});
+                    return;
+                }
+                target = { type: 'imagePrompt', sectionId: sectionImageEdit.sectionId, markerText: sectionImageEdit.markerText };
+            } else if (viewMode === 'sections') {
                 if (!expandedSectionId) {
                     M.toast({html: '请先放大一个段落窗口，再发送 AI 对话消息；或切换到全文视图以针对整篇文章对话', classes: 'orange', displayLength: 5000});
                     return;
                 }
-                sectionId = expandedSectionId;
+                target = { type: 'section', sectionId: expandedSectionId };
             }
 
             input.value = '';
             appendChatMsg('user', msg);
             sendBtn.disabled = true;
             const loadingId = appendChatLoading();
+            if (target.type === 'imagePrompt') {
+                // Masked for the whole round-trip, not just an eventual apply — whether this
+                // turn ends in discussion or an applied edit isn't knowable before the response.
+                sectionImageEdit.busy = true;
+                sectionImageEdit.busyLabel = 'AI 修改中...';
+                renderImageEditPortal();
+            }
 
             try {
                 const formData = new FormData();
                 formData.append('message', msg);
-                const chatUrl = sectionId
-                    ? `/writing/tasks/${TASK_ID}/sections/${sectionId}/chat`
-                    : `/writing/tasks/${TASK_ID}/chat`;
+                let chatUrl, startMark, endMark;
+                if (target.type === 'imagePrompt') {
+                    chatUrl = `/writing/tasks/${TASK_ID}/sections/${target.sectionId}/images/chat`;
+                    formData.append('marker_text', target.markerText);
+                    formData.append('current_prompt', sectionImageEdit.draftPrompt || '');
+                    startMark = '[IMAGE_PROMPT_UPDATE_START]'; endMark = '[IMAGE_PROMPT_UPDATE_END]';
+                } else if (target.type === 'section') {
+                    chatUrl = `/writing/tasks/${TASK_ID}/sections/${target.sectionId}/chat`;
+                    startMark = '[SECTION_UPDATE_START]'; endMark = '[SECTION_UPDATE_END]';
+                } else {
+                    chatUrl = `/writing/tasks/${TASK_ID}/chat`;
+                    startMark = '[WRITING_UPDATE_START]'; endMark = '[WRITING_UPDATE_END]';
+                }
+
                 const r = await fetch(chatUrl, { method:'POST', body:formData });
                 if (!r.ok) throw new Error('请求失败');
                 const d = await r.json();
                 const answer = d.answer || '';
                 removeChatLoading(loadingId);
 
-                const startMark = sectionId ? '[SECTION_UPDATE_START]' : '[WRITING_UPDATE_START]';
-                const endMark = sectionId ? '[SECTION_UPDATE_END]' : '[WRITING_UPDATE_END]';
                 const startIdx = answer.indexOf(startMark);
                 const endIdx = answer.indexOf(endMark);
 
                 if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
                     const newContent = answer.slice(startIdx + startMark.length, endIdx).trim();
                     const explanation = answer.slice(endIdx + endMark.length).trim();
-                    if (sectionId) {
-                        await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}`, {
+                    if (target.type === 'imagePrompt') {
+                        // Draft-only — never auto-saved. The user still has to click "保存" to
+                        // persist to writing_section_images.prompt, same as generate-prompt.
+                        if (sectionImageEdit && sectionImageEdit.sectionId === target.sectionId && sectionImageEdit.markerText === target.markerText) {
+                            sectionImageEdit.draftPrompt = newContent;
+                        }
+                        appendChatMsg('assistant', explanation || '✓ 已根据你的指令修改了这段 Prompt');
+                    } else if (target.type === 'section') {
+                        await fetch(`/writing/tasks/${TASK_ID}/sections/${target.sectionId}`, {
                             method:'PATCH',
                             headers:{'Content-Type':'application/json'},
                             body: JSON.stringify({content: newContent})
@@ -1864,6 +2359,10 @@
                 appendChatMsg('', '发送失败：' + e.message, true);
             } finally {
                 sendBtn.disabled = false;
+                if (target.type === 'imagePrompt' && sectionImageEdit && sectionImageEdit.sectionId === target.sectionId && sectionImageEdit.markerText === target.markerText) {
+                    sectionImageEdit.busy = false;
+                    renderImageEditPortal();
+                }
             }
         }
 
@@ -2332,7 +2831,8 @@
             });
         });
 
-        document.getElementById('btn-go-chat').addEventListener('click', function () {
+        var _goChat = document.getElementById('btn-go-chat');
+        if (_goChat) _goChat.addEventListener('click', function () {
             window.location.href = '/';
         });
 
@@ -2342,6 +2842,15 @@
         });
 
         M.Modal.init(document.getElementById('modal-del-writing'));
+        M.Modal.init(document.getElementById('modal-regen-image-prompt'));
+        document.getElementById('btn-confirm-regen-image-prompt').addEventListener('click', async function() {
+            const target = _pendingRegenSectionImage;
+            _pendingRegenSectionImage = null;
+            const m = M.Modal.getInstance(document.getElementById('modal-regen-image-prompt'));
+            if (m) m.close();
+            if (!target || !sectionImageEdit || sectionImageEdit.sectionId !== target.sectionId || sectionImageEdit.markerText !== target.markerText) return;
+            await doGenerateImagePrompt();
+        });
         document.getElementById('btn-confirm-del-writing').addEventListener('click', async function() {
             if (!_delWritingTaskId) return;
             const taskId = _delWritingTaskId;

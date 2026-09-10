@@ -11,3 +11,9 @@ static/loads/
 # Local-only：自动改代码工具，不上 git，不分享
 agent_system/
 templates/agent/
+static/maps/
+
+# 运行时生成的用户内容（作图模块按 <username>/<style_id> 出图、写作模块按 <username>/<task_id> 存图），
+# 不是代码，不上 git；static/images/ 顶层的 favicon 等静态资源不受影响（只忽略其子目录）
+static/images/*/
+static/writing_images/

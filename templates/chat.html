@@ -8,16 +8,15 @@
     <link rel="icon" href="/static/images/favicon.png">
     <link rel="stylesheet" href="/static/materialize/css/materialize.min.css">
     <link rel="stylesheet" href="/static/js/highlight/atom-one-dark.min.css">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=5">
 </head>
 <body>
 <ul id="slide-out" class="sidenav">
     <li class="brand-logo center">TSAI</li>
     <div class="sidenav-footer">
-        <button id="new-chat-btn" class="btn waves-effect waves-light modal-trigger" data-target="new-chat-modal">新建对话</button>
-        {% if can_write %}
-        <a id="btn-enter-writing" class="btn indigo waves-effect waves-light" href="/writing/">进入写作</a>
-        {% endif %}
+        <button id="new-chat-btn" class="btn waves-effect waves-light modal-trigger" data-target="new-chat-modal"><span class="btn-label-lg">新建对话</span></button>
+        {% set ms_current = 'chat' %}{% set ms_dd_id = 'module-dd-chat' %}
+        {% include '_module_switch.html' %}
     </div>
 </ul>
 <div class="main">

@@ -59,6 +59,12 @@ class Settings(BaseModel):
     agent_c_min_traces: int = int(os.getenv("AGENT_C_MIN_TRACES", "5"))
     secret_key: str = os.getenv("SECRET_KEY")
     base_dir: Path = BASE_DIR
+    # 作图模块 — 复用写作模块已在用的 Codex/OpenAI 兼容中转端点
+    codex_api_key: str | None = os.getenv("CODEX_API_KEY")
+    codex_base_url: str | None = os.getenv("CODEX_BASE_URL")
+    codex_image_model: str = os.getenv("CODEX_IMAGE_MODEL", "gpt-image-1")
+    # 图像生成/编辑的 read 超时（秒）。中转出图慢，默认给到 300s。
+    codex_image_timeout: float = float(os.getenv("CODEX_IMAGE_TIMEOUT", "300"))
 
 
 settings = Settings()
@@ -66,3 +72,29 @@ GEMINI_API_KEY = settings.gemini_api_key
 client = genai.Client(api_key=GEMINI_API_KEY)
 embed_client = client  # embedding 与 generation 共用同一客户端（v1beta）
 logger = logging.getLogger("TSAI")
+
+# ── 地图模块（/map/）瓦片端点 ───────────────────────────────────────────────
+# 全部由用户浏览器直连，不经服务器代理、无 API key。按需求不做镜像源 / .env 配置，
+# 作为常量集中在此。GET /map/tile-config 把它们下发给前端。
+MAP_TILE_CONFIG = {
+    "satellite": {
+        # 注意模板顺序是 {z}/{y}/{x}
+        "tiles": ["https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg"],
+        "tileSize": 256,
+        "maxzoom": 14,
+        "attribution": "Sentinel-2 cloudless © <a href=\"https://s2maps.eu\">EOX</a> · modified Copernicus Sentinel data 2020",
+    },
+    "terrain": {
+        "tiles": ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
+        "tileSize": 512,
+        "maxzoom": 17,
+        "encoding": "terrarium",
+        "attribution": "<a href=\"https://mapterhorn.com/attribution\" target=\"_blank\" rel=\"noopener\">© Mapterhorn</a>",
+    },
+    "vector": {
+        "tilejson": "https://tiles.openfreemap.org/planet",
+        "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+        "attribution": "© <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noopener\">OpenStreetMap</a> contributors, OpenMapTiles",
+    },
+    "isolateAttribution": "Natural Earth (public domain) · © OpenStreetMap contributors (ODbL) — narrative silhouette, not an official boundary",
+}

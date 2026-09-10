@@ -108,17 +108,79 @@ body {
     left: 0;
     width: 100%;
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
     padding: 0 12px;
     box-sizing: border-box;
 }
+.sidenav-footer .btn {
+    white-space: nowrap;
+    flex-shrink: 0;
+}
 #new-chat-btn,
-#btn-enter-writing {
+#btn-enter-writing,
+#btn-enter-drawing {
     border-radius: 4px;
 }
 #new-chat-btn {
     background-color: #e57373e6;
+}
+
+/* 「切换模块」向上弹出菜单（_module_switch.html） */
+.module-switch {
+    position: relative;
+    flex-shrink: 0;
+}
+.module-switch .module-switch-btn {
+    border-radius: 4px;
+    white-space: nowrap;
+    width: auto;
+    min-width: 0;
+    padding: 0 14px;
+    font-size: 13px;
+    letter-spacing: 1px;
+}
+.module-switch-menu {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 120px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
+    padding: 4px 0;
+    display: none;
+    z-index: 1200;
+}
+.module-switch.open .module-switch-menu {
+    display: block;
+}
+.module-switch-menu a {
+    display: block;
+    padding: 9px 18px;
+    color: #333;
+    font-size: 14px;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+.module-switch-menu a:hover {
+    background: #f0f0f0;
+    color: #3949ab;
+}
+
+/* 三个模块（对话/写作/作图）侧边栏底部按钮文字宽度统一，跨页面保持像素一致 */
+.btn-label-lg {
+    display: inline-block;
+    width: 58px;
+    text-align: center;
+}
+.btn-label-sm {
+    display: inline-block;
+    width: 29px;
+    text-align: center;
 }
 
 /* FAB 部分 */

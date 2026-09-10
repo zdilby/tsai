@@ -1,0 +1,481 @@
+body { overflow: hidden; background: #fff; }
+
+@media only screen and (min-width: 993px) {
+    #slide-out { display: none !important; }
+    #map-sidebar { flex: 0 0 260px; }
+}
+@media only screen and (max-width: 992px) {
+    #map-sidebar { display: none; }
+    #map-settings { display: none; }
+    .map-layout { grid-template-columns: 1fr; }
+}
+
+.map-shell {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+.map-top-nav {
+    flex-shrink: 0;
+    height: 64px !important;
+    line-height: 64px !important;
+}
+.map-layout {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    height: calc(100vh - 64px);
+    overflow: hidden;
+}
+
+/* ---- 左侧地图列表 ---- */
+#map-sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-right: 1px solid #eee;
+}
+.map-sidebar-brand {
+    height: 64px;
+    line-height: 64px;
+    text-align: center;
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: #ee6e73;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0;
+}
+#map-list { flex-grow: 1; overflow-y: auto; padding: 12px 0; }
+.map-empty { color: #888; font-size: 0.9rem; padding: 18px; margin: 0; }
+.map-item {
+    min-height: 48px;
+    padding: 8px 8px 8px 16px;
+    cursor: pointer;
+    color: rgba(0,0,0,0.75);
+    display: flex;
+    align-items: center;
+    transition: background-color .2s ease;
+}
+.map-item:hover { background: #f0f0f0; }
+.map-item.active { background: #5c6bc0; color: #fff; }
+.map-item-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.map-item-del {
+    flex-shrink: 0; width: 24px; height: 24px; background: none; border: none;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity .2s; margin-left: 4px; padding: 0;
+}
+.map-item:hover .map-item-del { opacity: 1; }
+.map-item-del i.material-icons { color: rgba(0,0,0,0.75); font-size: 18px; }
+.map-item.active .map-item-del i.material-icons { color: #fff; }
+.map-sidebar-actions {
+    flex-shrink: 0;
+    padding: 14px 12px 1.5em;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+}
+.map-sidebar-actions .btn { border-radius: 4px; white-space: nowrap; flex-shrink: 0; }
+
+/* ---- 中间地图 ---- */
+#map-main {
+    position: relative;
+    overflow: hidden;
+    background: #c8c2b4;
+    min-width: 0;
+}
+#maplibre-map { position: absolute; inset: 0; }
+
+/* CSS 古卷滤镜叠层（DOM 层，不在 MapLibre paint 里）*/
+#map-main::after {
+    content: "";
+    position: absolute; inset: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,var(--vignette,0)) 130%);
+    z-index: 3;
+}
+#map-warm-tint {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    mix-blend-mode: soft-light;
+    z-index: 2;
+}
+
+#map-empty-state {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #7a7266; font-size: 14px; background: #c8c2b4; z-index: 5;
+}
+#map-fatal {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 40px;
+    color: #7a2e2e; font-size: 14px; line-height: 1.7; background: #efe7dc; z-index: 20;
+}
+
+/* 顶部浮层工具条 */
+#map-toolbar {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    background: rgba(255,255,255,0.92);
+    border: 1px solid #d8d2c4;
+    border-radius: 6px;
+    padding: 6px 8px;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.12);
+}
+#map-toolbar .seg { display: inline-flex; border: 1px solid #c9b98a; border-radius: 4px; overflow: hidden; }
+#map-toolbar .seg button {
+    border: 0; background: transparent; color: #5b544a; cursor: pointer;
+    padding: 4px 10px; font-size: 12px;
+}
+#map-toolbar .seg button.active { background: #5c6bc0; color: #fff; }
+.mt-btn {
+    border: 1px solid #d8d2c4; background: #fff; color: #5b544a;
+    border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer;
+}
+.mt-btn:hover { border-color: #5c6bc0; color: #3949ab; }
+
+.map-hidden-when-empty.map-empty-hidden { display: none !important; }
+
+/* maplibre attribution 收紧一点 */
+.maplibregl-ctrl-attrib { font-size: 10px; }
+
+/* ---- 右侧设置面板 ---- */
+#map-settings {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid #eee;
+}
+.map-tabs {
+    display: flex; flex-shrink: 0;
+    border-bottom: 1px solid #e0e0e0;
+}
+.map-tabs a {
+    flex: 1; text-align: center; padding: 12px 4px;
+    font-size: 13px; color: #9e9e9e; font-weight: 600; letter-spacing: .5px;
+}
+.map-tabs a.active { color: #5c6bc0; border-bottom: 2px solid #5c6bc0; }
+.map-tab-panel { flex: 1; overflow-y: auto; }
+
+.settings-title {
+    font-size: 13px; font-weight: 600; color: #5c6bc0;
+    padding: 12px 16px 8px; border-bottom: 1px solid #e0e0e0;
+    letter-spacing: .5px; background: #fafafa;
+}
+.settings-title.collapsible {
+    display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; user-select: none;
+}
+.collapse-btn {
+    border: none; background: transparent; color: #9e9e9e;
+    font-size: 13px; line-height: 1; padding: 0 4px; cursor: pointer;
+    transition: transform .15s ease, color .15s ease;
+}
+.settings-title.collapsible:hover .collapse-btn { color: #5c6bc0; }
+.settings-title.collapsed .collapse-btn { transform: rotate(-90deg); }
+.setting-item { padding: 8px 16px; border-bottom: 1px solid #f5f5f5; }
+.setting-item label {
+    display: block; font-size: 11px; color: #9e9e9e; margin-bottom: 4px;
+    text-transform: uppercase; letter-spacing: .5px;
+}
+.setting-input {
+    width: 100%; border: 1px solid #e0e0e0; border-radius: 4px;
+    padding: 6px 8px; font-size: 13px; box-sizing: border-box;
+}
+.setting-item input[type="range"] { width: 100%; }
+.setting-item .v { color: #5c6bc0; font-weight: 600; text-transform: none; }
+.map-color { width: 100%; height: 30px; border: 1px solid #e0e0e0; border-radius: 4px; background: #fff; padding: 2px; }
+.map-rgba { font-family: monospace; font-size: 12px; }
+
+.map-toggle-row { display: flex; align-items: center; justify-content: space-between; }
+.map-toggle-row span { font-size: 13px; color: #444; }
+.map-toggle-row.map-sub { padding-left: 26px; background: #fafafa; }
+.map-toggle-row.map-sub span { font-size: 12px; color: #777; }
+
+/* 自定义开关：扁平、无阴影、无 3D；滑块与轨道等高、无上下空隙。
+   轨道/滑块画在 label 的 ::before/::after 上，不放同级 <span> ——
+   否则会被 materialize 的 [type=checkbox] + span 规则接管，渲染成方框。 */
+.setting-item .map-switch {
+    position: relative; display: inline-block;
+    width: 38px; height: 20px; flex-shrink: 0;
+    margin: 0; padding: 0; cursor: pointer;
+}
+.map-switch input {
+    position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+    opacity: 0; -webkit-appearance: none; appearance: none; cursor: pointer;
+}
+.map-switch::before {
+    content: ""; position: absolute; inset: 0;
+    background: #d5d5d5; border-radius: 10px;
+    transition: background .15s ease;
+}
+.map-switch::after {
+    content: ""; position: absolute; left: 0; top: 0;
+    width: 20px; height: 20px; box-sizing: border-box;
+    background: #fff; border: 1px solid #cfcfcf; border-radius: 50%;
+    transition: transform .15s ease, border-color .15s ease;
+}
+.map-switch:has(input:checked)::before { background: #5c6bc0; }
+.map-switch:has(input:checked)::after { transform: translateX(18px); border-color: #5c6bc0; }
+.map-switch input:focus-visible { outline: 2px solid #3949ab; outline-offset: 2px; border-radius: 10px; }
+/* 已经在别的组里的条目：勾选框锁死、变暗，不能直接勾进当前组（单一归属） */
+.map-switch.disabled { opacity: .4; cursor: not-allowed; }
+.map-switch.disabled input { cursor: not-allowed; }
+
+/* Tab B */
+.annot-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+.annot-tool {
+    border: 1px solid #d8d2c4; background: #fff; color: #5b544a;
+    border-radius: 4px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+}
+.annot-tool.active { background: #5c6bc0; color: #fff; border-color: #5c6bc0; }
+.annot-hint { font-size: 12px; color: #9e9e9e; margin: 8px 0 0; line-height: 1.5; }
+.annot-field { margin-bottom: 8px; }
+.annot-field label { font-size: 11px; color: #9e9e9e; display: block; margin-bottom: 3px; text-transform: uppercase; }
+.annot-field input[type="text"], .annot-field select, .annot-field textarea {
+    width: 100%; border: 1px solid #e0e0e0; border-radius: 4px; padding: 5px 7px; font-size: 13px; box-sizing: border-box;
+}
+.annot-field.inline { display: flex; align-items: center; justify-content: space-between; }
+.annot-field.inline label { margin: 0; }
+/* 开关行（显示名称标注 / 显示信息框 等）的文字用黑色加粗，在面板里更醒目 */
+.annot-field.inline > label:not(.map-switch) {
+    color: #1e140c;
+    font-weight: 700;
+    font-size: 13px;
+    text-transform: none;
+}
+.annot-field select.browser-default { height: 30px; background: #fff; }
+.annot-num { display: flex; align-items: center; gap: 8px; }
+.annot-num input[type="range"] { flex: 1; min-width: 0; }
+.annot-num-v { flex: 0 0 auto; font-size: 12px; color: #5c6bc0; font-weight: 600; min-width: 2.4em; text-align: right; }
+.annot-list-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 4px; border-bottom: 1px solid #f0f0f0; font-size: 12px; cursor: pointer;
+}
+.annot-list-item:hover { background: #f5f5f7; }
+.annot-list-item.sel { background: #e8eaf6; }
+.annot-list-item .swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(0,0,0,.15); }
+.annot-list-item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 组条目：加粗 + 淡靛蓝底，和普通点/线条目区分开 */
+.annot-list-item.group-row { background: #f3f4fc; font-weight: 700; }
+.annot-list-item.group-row:hover { background: #eef0fb; }
+.annot-list-item.group-row.sel { background: #dde1f7; }
+.annot-list-item.group-row .nm { font-weight: 700; color: #3949ab; }
+/* 组的子条目：段首缩进，体现层级关系；不属于任何组的条目不缩进，和组条目左边对齐 */
+.annot-list-item.child-row { padding-left: 26px; }
+.grp-collapse-btn { flex-shrink: 0; margin-right: 2px; }
+.collapse-btn.collapsed { transform: rotate(-90deg); }
+/* 拖拽排序 */
+.annot-list-item[draggable="true"] { cursor: grab; }
+.annot-list-item.dragging { opacity: .4; }
+.annot-list-item.drag-over-before { box-shadow: inset 0 2px 0 0 #3949ab; }
+.annot-list-item.drag-over-after { box-shadow: inset 0 -2px 0 0 #3949ab; }
+/* 新建组：勾选子条目阶段的顶部操作条 */
+.grp-pick-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.grp-pick-btn {
+    height: 28px; line-height: 26px; padding: 0 12px; font-size: 12px;
+    border-radius: 4px; cursor: pointer; box-sizing: border-box;
+}
+.grp-pick-btn.primary { border: 1px solid #5c6bc0; background: #5c6bc0; color: #fff; }
+.grp-pick-btn.primary:hover { background: #3949ab; border-color: #3949ab; }
+.grp-pick-btn.ghost { border: 1px solid #ccc; background: #fff; color: #555; }
+.grp-pick-btn.ghost:hover { border-color: #999; color: #333; }
+.annot-del-btn {
+    flex-shrink: 0;
+    border: 1px solid #ef9a9a;
+    background: #fff;
+    color: #c62828;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    cursor: pointer;
+    transition: background .12s ease, color .12s ease;
+}
+.annot-del-btn:hover { background: #c62828; color: #fff; border-color: #c62828; }
+
+/* 加点子面板：输入框 + 按钮同一行、等高（以「按坐标添加」按钮为准 = 30px） */
+.annot-inline {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+}
+.annot-in {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 30px;
+    box-sizing: border-box;
+    margin: 0;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 4px 7px;
+    font-size: 12px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+.annot-in[type="number"] { -moz-appearance: textfield; }
+.annot-in[type="number"]::-webkit-inner-spin-button,
+.annot-in[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.annot-in[type="search"]::-webkit-search-cancel-button,
+.annot-in[type="search"]::-webkit-search-decoration { -webkit-appearance: none; }
+#add-point-panel .annot-add-btn {
+    flex: 0 0 auto;
+    height: 30px;
+    box-sizing: border-box;
+    margin: 0;
+    border: 1px solid #5c6bc0;
+    background: #5c6bc0;
+    color: #fff;
+    border-radius: 4px;
+    padding: 0 12px;
+    font-size: 12px;
+    line-height: 28px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .12s ease;
+}
+#add-point-panel .annot-add-btn:hover { background: #3949ab; border-color: #3949ab; }
+#geocode-results { margin-top: 6px; }
+.geocode-item {
+    padding: 6px 8px;
+    border: 1px solid #eee;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    background: #fff;
+    transition: background .12s ease, border-color .12s ease;
+}
+.geocode-item:hover { background: #eef0fb; border-color: #c5cae9; }
+.geocode-item .gc-name { font-size: 13px; color: #333; }
+.geocode-item .gc-sub { font-size: 11px; color: #999; margin-top: 2px; word-break: break-all; }
+.annot-danger { color: #c62828; }
+
+/* ---- 地图上的点位 Marker / 信息框 ---- */
+.map-pt {
+    /* 必须是 absolute：.maplibregl-marker 靠 CSS 设 position:absolute，而本文件在
+       maplibre-gl.css 之后加载、同权重会覆盖它 —— 若改成 relative，标记会落进正常流、
+       被前面标记的尺寸挤偏（越靠后偏得越多），随缩放看起来就“漂移/错位”。
+       absolute 同样能作为徽章(position:absolute)的定位包含块。
+       只包住“点”本身(shape)，徽章绝对定位挂在外面，不影响本盒子尺寸与锚点。 */
+    position: absolute;
+    display: block;
+    line-height: 0;
+    cursor: pointer; user-select: none;
+}
+.map-pt-shape {
+    display: block;
+    width: 16px; height: 16px;
+    border: 1.5px solid #1e140c;
+    background: #b8442e;
+    box-shadow: 0 1px 2px rgba(0,0,0,.35);
+}
+.map-pt-shape.circle { border-radius: 50%; }
+.map-pt-shape.diamond { transform: rotate(45deg); }
+.map-pt-shape.gate { clip-path: polygon(15% 100%, 15% 35%, 50% 0, 85% 35%, 85% 100%); }
+.map-pt-shape.star { clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); }
+.map-pt.sel .map-pt-shape { outline: 2px solid #3949ab; outline-offset: 2px; }
+
+/* 选中连线时的起/终点拖动手柄：空心蓝环，明显区别于实心点位 */
+.link-handle {
+    width: 16px; height: 16px; box-sizing: border-box;
+    border-radius: 50%;
+    background: #fff;
+    border: 3px solid #3949ab;
+    box-shadow: 0 1px 5px rgba(0,0,0,.45);
+    cursor: move;
+}
+.link-handle:hover { border-color: #1a237e; background: #e8eaf6; }
+/* 端点与点位重合时，手柄所在的 marker 容器压在点位之上，优先被抓取 */
+.maplibregl-marker:has(.link-handle) { z-index: 5; }
+/* 名称标注：徽章样式（可选信息框 + 可选前缀元素），参考 static/images/map_demo.png。
+   绝对定位挂在点的正下方居中，尺寸变化不影响 .map-pt 盒子、不动锚点。 */
+.map-pt-badge {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: stretch;
+    white-space: nowrap;
+    line-height: 1.2;
+    font-weight: 600;
+    max-width: 220px;
+}
+.map-pt-badge.boxed {
+    border: 1px solid #b89562;
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,.28);
+}
+.map-pt-prefix {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1px 5px;
+    font-weight: 700;
+    border-radius: 3px;
+}
+.map-pt-badge.boxed .map-pt-prefix { border-radius: 0; }
+.map-pt-badge:not(.boxed) .map-pt-prefix { margin-right: 4px; }
+.map-pt-name {
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.map-pt-badge:not(.boxed) .map-pt-name {
+    text-shadow: 0 1px 2px rgba(255,255,255,.95), 0 0 2px rgba(255,255,255,.95);
+}
+
+/* ---- 组（统一修改，非样式叠层）---- */
+.grp-new-btn {
+    border: 1px solid #5c6bc0; background: #5c6bc0; color: #fff;
+    border-radius: 4px; padding: 2px 10px; font-size: 12px; cursor: pointer;
+    text-transform: none; letter-spacing: normal;
+}
+.grp-new-btn:hover { background: #3949ab; }
+.grp-sub {
+    font-size: 12px; font-weight: 700; color: #1e140c;
+    margin: 12px 0 6px;
+    display: flex; align-items: center; justify-content: space-between;
+}
+.grp-mem-count { font-size: 11px; font-weight: 600; color: #5c6bc0; }
+.grp-members {
+    max-height: 168px; overflow-y: auto;
+    border: 1px solid #e0e0e0; border-radius: 4px; padding: 4px; background: #fafafa;
+}
+.grp-mem {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px; border-bottom: 1px solid #f0f0f0;
+}
+.grp-mem:last-child { border-bottom: none; }
+.grp-mem .swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(0,0,0,.15); }
+.grp-mem-nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: #444; }
+/* 之前误用了作用域限定在 #add-point-panel 下的 .annot-add-btn，这里挂不上那份样式、
+   等于裸浏览器默认按钮。改成自带完整样式，配色/圆角/字号与「按坐标添加」「搜索」
+   「＋ 新建组」等其他按钮保持一致（靛蓝实心，深色 hover）。 */
+.grp-apply-btn {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin: 12px 0 4px;
+    height: 30px;
+    border: 1px solid #5c6bc0;
+    background: #5c6bc0;
+    color: #fff;
+    border-radius: 4px;
+    padding: 0 12px;
+    font-size: 12px;
+    line-height: 28px;
+    text-align: center;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease;
+}
+.grp-apply-btn:hover { background: #3949ab; border-color: #3949ab; }
+.grp-dissolve-btn { display: block; width: 100%; margin: 8px 0 4px; }
+/* 选中一个组时，地图上该组成员点位加虚线描边提示（列表里的层级缩进已经能看出归属，这里不再重复） */
+.map-pt.in-group .map-pt-shape { outline: 2px dashed #3949ab; outline-offset: 2px; }

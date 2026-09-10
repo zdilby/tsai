@@ -13,7 +13,8 @@ from backend.db import (
     get_session_messages_detail, get_session_daily_tokens,
     get_session_files, get_session_info, update_user_max_tokens,
     update_user_max_file_size, update_user_password,
-    update_user_admin_status, update_user_writing_permission,
+    update_user_admin_status, update_user_writing_permission, update_user_drawing_permission,
+    update_user_map_permission,
     get_all_invite_codes, create_invite_code,
     get_all_subsystem_status, list_prompt_versions,
     list_agent_b_runs, list_agent_c_runs,
@@ -139,6 +140,26 @@ async def set_user_writing_permission(
     user: dict = Depends(get_current_admin)
 ):
     await update_user_writing_permission(user_id, bool(can_write))
+    return {"success": True}
+
+
+@admin_router.post("/user/{user_id}/set_draw", response_class=JSONResponse)
+async def set_user_drawing_permission(
+    user_id: int,
+    can_draw: int = Form(...),
+    user: dict = Depends(get_current_admin)
+):
+    await update_user_drawing_permission(user_id, bool(can_draw))
+    return {"success": True}
+
+
+@admin_router.post("/user/{user_id}/set_map", response_class=JSONResponse)
+async def set_user_map_permission(
+    user_id: int,
+    can_map: int = Form(...),
+    user: dict = Depends(get_current_admin)
+):
+    await update_user_map_permission(user_id, bool(can_map))
     return {"success": True}
 
 
