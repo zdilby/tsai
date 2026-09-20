@@ -1067,6 +1067,33 @@
     </div>
 </div>
 
+<div id="modal-reconcile-confirm" class="modal">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>改动较大，请确认</h5>
+        <p style="color:#757575;font-size:13px">本次保存有多个段落无法与原有内容精确对应，请确认：</p>
+        <div id="reconcile-confirm-detail" style="max-height:320px;overflow-y:auto;font-size:13px"></div>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-red btn-flat">取消</a>
+        <a href="#!" id="btn-confirm-reconcile" class="waves-effect waves-green btn-flat">确定继续</a>
+    </div>
+</div>
+
+<div id="modal-outline-review" class="modal" style="width:640px;max-height:80%">
+    <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
+    <div class="modal-content" style="padding-bottom: 10px;">
+        <h5>大纲可能需要跟进调整</h5>
+        <p style="color:#757575;font-size:13px">这段刚生成的内容和目前的大纲有出入，AI 给出了以下调整建议——只是建议，不选也不影响刚生成的内容。</p>
+        <div id="outline-review-detail" style="font-size:13px"></div>
+    </div>
+    <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-grey btn-flat">取消</a>
+        <a href="#!" id="btn-outline-review-section" class="waves-effect waves-teal btn-flat">只调整本段大纲</a>
+        <a href="#!" id="btn-outline-review-overall" class="waves-effect waves-green btn-flat">调整整体大纲</a>
+    </div>
+</div>
+
 <div id="modal-regen-image-prompt" class="modal" style="max-width:420px">
     <a href="#!" class="modal-close" style="position:absolute;top:10px;right:16px;font-size:1.4rem;color:#9e9e9e;line-height:1;text-decoration:none;">×</a>
     <div class="modal-content" style="padding-bottom: 10px;">
@@ -1116,6 +1143,13 @@
     // sectionDraftEdit but for the image-edit side panel; the two are mutually exclusive.
     let sectionImageEdit = null;
     let taskTimestamps = {outline_updated_at: null, toc_updated_at: null};
+    // 保存目录/大纲时，如果后端判定改动太大（见 patchTaskWithReconcile），暂存这次
+    // 没发出去的 payload，等用户在确认弹窗里点"确定继续"后带上 confirm_reconcile 重发。
+    let pendingReconcilePatch = null;
+    // 大纲一致性检查的"整体调整"方案也可能触发同一道 >3 高风险确认——复用同一个
+    // #modal-reconcile-confirm 弹窗，但重试动作不一样，所以单独存一个"确认后要调用
+    // 什么"的函数，和上面的 pendingReconcilePatch 二选一，谁非空就是这次弹窗对应谁。
+    let pendingOutlineReviewRetry = null;
     let viewMode = 'article'; // 'article' | 'sections'
     let settingsDirty = false;
     let contentSaved = true;
@@ -1132,6 +1166,134 @@
         settingsDirty = !deepEqual(localSettings, savedSettings);
         document.getElementById('btn-save-settings').disabled = !settingsDirty;
         document.getElementById('btn-update-content').disabled = settingsDirty || !localSettings.outline || !TASK_ID;
+    }
+
+    // 目录/大纲保存统一走这里：后端在改动太大（见 backend/db.py reconcile_writing_sections）
+    // 时会返回 needs_confirm 而不直接写库，这里暂存 payload、弹窗展示明细，交给
+    // btn-confirm-reconcile 在用户确认后带 confirm_reconcile:true 重新提交。
+    async function patchTaskWithReconcile(payload) {
+        const r = await fetch(`/writing/tasks/${TASK_ID}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || '保存失败');
+        if (d.needs_confirm) {
+            pendingReconcilePatch = payload;
+            renderReconcilePreview(d.reconcile_preview);
+            M.Modal.getInstance(document.getElementById('modal-reconcile-confirm')).open();
+            return {ok: false, pending: true};
+        }
+        return {ok: true, data: d};
+    }
+
+    function renderReconcilePreview(p) {
+        const parts = [];
+        if (p.renamed && p.renamed.length) parts.push('<b>识别为改名（内容保留）：</b><ul>' +
+            p.renamed.map(r => `<li>${escHtml(r.old_heading)} → ${escHtml(r.new_heading)}</li>`).join('') + '</ul>');
+        if (p.archived && p.archived.length) parts.push('<b>将被归档（不再显示）：</b><ul>' +
+            p.archived.map(a => `<li>${escHtml(a.heading)}${a.had_content ? '（含已生成内容）' : ''}</li>`).join('') + '</ul>');
+        if (p.inserted && p.inserted.length) parts.push('<b>新增空段落：</b><ul>' +
+            p.inserted.map(i => `<li>${escHtml(i.heading)}</li>`).join('') + '</ul>');
+        document.getElementById('reconcile-confirm-detail').innerHTML = parts.join('') || '<p>无</p>';
+    }
+
+    // 目录/大纲的 reconcile 会互相影响彼此的派生文本（改顺序、改名都会同时体现在两边），
+    // 所以每次拿到 reconcile 结果都要把 outline 和 toc 一起刷新，不能只刷新用户这次
+    // 编辑的那个字段，否则另一个编辑框会显示过期内容、脏检查也会误判。
+    function applyReconcileResultToSettings(reconcileResult) {
+        if (!reconcileResult) return;
+        localSettings.outline = savedSettings.outline = reconcileResult.outline;
+        localSettings.toc = savedSettings.toc = reconcileResult.toc;
+    }
+
+    // 三处发起目录/大纲相关 PATCH 的地方（保存目录、保存设置、确认弹窗二次提交）
+    // 共用的收尾逻辑：pending（needs_confirm）时原样把结果透传给调用方处理，
+    // 否则把 reconcile 返回的规范化 outline/toc 写回、刷新过期时间戳、重载段落列表。
+    async function finishSettingsPatch(payload) {
+        const result = await patchTaskWithReconcile(payload);
+        if (!result.ok) return result;
+        if (result.data.reconcile) applyReconcileResultToSettings(result.data.reconcile);
+        const tr = await fetch(`/writing/tasks/${TASK_ID}`);
+        if (tr.ok) {
+            const td = await tr.json();
+            taskTimestamps = {
+                outline_updated_at: td.outline_updated_at || null,
+                toc_updated_at: td.toc_updated_at || null,
+            };
+        }
+        await loadSections(TASK_ID);
+        return result;
+    }
+
+    // 段落生成完成后，若后端判定大纲该跟进调整（见 writing.py:_check_outline_drift），
+    // SSE 流末尾会带一个 outline_review 信号帧（generateSection() 里已经识别出来），
+    // 这里弹窗展示建议、等用户三选一。
+    let currentOutlineReview = null;
+
+    function openOutlineReviewModal(review) {
+        currentOutlineReview = review;
+        const parts = [];
+        if (review.section_suggestion) {
+            parts.push('<b>本段大纲建议：</b><div style="white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:4px;padding:8px;margin:4px 0 10px;max-height:160px;overflow-y:auto">' +
+                escHtml(review.section_suggestion) + '</div>');
+        }
+        if (review.overall_suggestion) {
+            parts.push('<b>整体大纲建议（将替换完整大纲，可能影响段落顺序/数量）：</b><div style="white-space:pre-wrap;background:#fff8e1;border:1px solid #ffe082;border-radius:4px;padding:8px;margin:4px 0 10px;max-height:220px;overflow-y:auto">' +
+                escHtml(review.overall_suggestion) + '</div>');
+        }
+        if (review.retrofits && review.retrofits.length) {
+            parts.push('<b>顺带回填的其它段落大纲（不改动它们的正文）：</b><ul>' +
+                review.retrofits.map(r => {
+                    const snippet = (r.new_sub_outline || '').slice(0, 80);
+                    const ellipsis = (r.new_sub_outline || '').length > 80 ? '…' : '';
+                    return `<li>${escHtml(r.heading)}：${escHtml(snippet)}${ellipsis}</li>`;
+                }).join('') + '</ul>');
+        }
+        document.getElementById('outline-review-detail').innerHTML = parts.join('') || '<p>无具体建议</p>';
+        document.getElementById('btn-outline-review-section').style.display = review.section_suggestion ? '' : 'none';
+        document.getElementById('btn-outline-review-overall').style.display = review.overall_suggestion ? '' : 'none';
+        M.Modal.getInstance(document.getElementById('modal-outline-review')).open();
+    }
+
+    async function applyOutlineReview(scope, extraPayload) {
+        const review = currentOutlineReview;
+        if (!review) return;
+        const payload = Object.assign({
+            scope,
+            section_suggestion: review.section_suggestion || null,
+            overall_suggestion: review.overall_suggestion || null,
+            retrofits: review.retrofits || [],
+        }, extraPayload || {});
+        const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${review.section_id}/apply_outline_review`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || '应用失败');
+        if (d.needs_confirm) {
+            // 整体方案自己也可能撞上 >3 高风险归档的阈值——复用现成的确认弹窗，
+            // 而不是再造一套；确认后带 confirm_reconcile:true 重放同一次 apply。
+            pendingOutlineReviewRetry = () => applyOutlineReview(scope, {confirm_reconcile: true});
+            renderReconcilePreview(d.reconcile_preview);
+            M.Modal.getInstance(document.getElementById('modal-reconcile-confirm')).open();
+            return;
+        }
+        currentOutlineReview = null;
+        await loadSections(TASK_ID);
+        const tr = await fetch(`/writing/tasks/${TASK_ID}`);
+        if (tr.ok) {
+            const td = await tr.json();
+            localSettings.outline = savedSettings.outline = td.outline || '';
+            localSettings.toc = savedSettings.toc = td.toc || '';
+            taskTimestamps = {
+                outline_updated_at: td.outline_updated_at || null,
+                toc_updated_at: td.toc_updated_at || null,
+            };
+        }
+        M.toast({html: '大纲已调整', classes: 'indigo'});
     }
 
     function loadSettingsFromTask(task) {
@@ -1420,7 +1582,9 @@
                 ? DOMPurify.sanitize(marked.parse(sec.content))
                 : '<span style="color:#bdbdbd;font-size:13px">（尚未生成内容）</span>';
             if (hasContent) contentHtml = injectImageMarkerIcons(contentHtml, sec.id);
-            const subOutlineHtml = sec.sub_outline
+            // 已经有内容（生成过或人工编辑替换过）的段落，内容以人工编辑为准，可能早就
+            // 和当时的大纲片段不一样了——不再显示这份可能过时的大纲，避免误导。
+            const subOutlineHtml = (sec.sub_outline && !hasContent)
                 ? `<div class="section-sub-outline">${escHtml(sec.sub_outline)}</div>`
                 : '';
             const expandToggleHtml = hasContent
@@ -1893,7 +2057,7 @@
             if (!resp.ok) throw new Error(await resp.text());
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
-            let buffer = '', fullContent = '', finished = false;
+            let buffer = '', fullContent = '', finished = false, outlineReview = null;
             while (!finished) {
                 const {done, value} = await reader.read();
                 if (done) break;
@@ -1904,13 +2068,22 @@
                     if (line.startsWith('data: ')) {
                         const raw = line.slice(6);
                         if (raw === '[DONE]') { finished = true; break; }
-                        fullContent += decodeSseData(raw);
+                        const decoded = decodeSseData(raw);
+                        // 正文分片是字符串；大纲一致性检查的信号帧是一个对象
+                        // （见 writing.py:generate_section_content 的 outline_review 帧），
+                        // 两者共用同一条 SSE 通道，靠类型区分，不占用正文字数统计。
+                        if (decoded && typeof decoded === 'object' && decoded.type === 'outline_review') {
+                            outlineReview = decoded;
+                            continue;
+                        }
+                        fullContent += decoded;
                         if (preview) preview.innerHTML = `<span style="color:#9e9e9e;font-size:13px">生成中... ${fullContent.length} 字</span>`;
                     }
                 }
             }
             await loadSections(TASK_ID);
             M.toast({html: '段落已生成', classes: 'indigo'});
+            if (outlineReview) openOutlineReviewModal(outlineReview);
         } catch (e) {
             if (preview) preview.innerHTML = origHtml;
             M.toast({html: '生成失败：' + e.message, classes: 'red'});
@@ -1971,9 +2144,26 @@
                 body: JSON.stringify({content: draftContent})
             });
             if (!r.ok) throw new Error(await r.text());
+            const d = await r.json().catch(() => ({}));
             sectionDraftEdit = null;
             await loadSections(TASK_ID);
-            M.toast({html: '已用编辑内容替换该段落', classes: 'indigo'});
+            if (d.heading_synced) {
+                // 正文首行改了标题：后端已经同步了 heading 并重新拼过 outline/toc 派生文本，
+                // 这里把任务详情拉一份新的，让大纲/目录编辑框下次打开时不是过期内容。
+                const tr = await fetch(`/writing/tasks/${TASK_ID}`);
+                if (tr.ok) {
+                    const td = await tr.json();
+                    localSettings.outline = savedSettings.outline = td.outline || '';
+                    localSettings.toc = savedSettings.toc = td.toc || '';
+                    taskTimestamps = {
+                        outline_updated_at: td.outline_updated_at || null,
+                        toc_updated_at: td.toc_updated_at || null,
+                    };
+                }
+                M.toast({html: `标题已同步为「${escHtml(d.heading_synced.new)}」`, classes: 'indigo'});
+            } else {
+                M.toast({html: '已用编辑内容替换该段落', classes: 'indigo'});
+            }
         } catch (e) {
             M.toast({html: '替换失败：' + e.message, classes: 'red'});
         }
@@ -2504,21 +2694,15 @@
             // If TOC is saved and task exists, immediately persist + sync sections
             if (TASK_ID && toc) {
                 try {
-                    const r = await fetch(`/writing/tasks/${TASK_ID}`, {
-                        method: 'PATCH',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({toc})
-                    });
-                    if (r.ok) {
-                        savedSettings.toc = toc;
-                        settingsDirty = !deepEqual(localSettings, savedSettings);
-                        document.getElementById('btn-save-settings').disabled = !settingsDirty;
-                        await loadSections(TASK_ID);
+                    const result = await finishSettingsPatch({toc});
+                    if (result.ok) {
+                        checkDirty();
                         if (sections.length > 0) showSectionsView();
-                        M.toast({html: `目录已保存，生成 ${sections.length} 个分段`, classes: 'indigo'});
+                        M.toast({html: `目录已保存，共 ${sections.length} 个分段`, classes: 'indigo'});
                     }
+                    // pending（needs_confirm）：确认弹窗已经打开，等用户确认/取消
                 } catch(e) {
-                    M.toast({html: '目录保存失败', classes: 'red'});
+                    M.toast({html: '目录保存失败：' + e.message, classes: 'red'});
                 }
             }
         });
@@ -2602,26 +2786,13 @@
                 for (const key of Object.keys(localSettings)) {
                     if (!deepEqual(localSettings[key], savedSettings[key])) changed[key] = localSettings[key];
                 }
-                const r = await fetch(`/writing/tasks/${TASK_ID}`, {
-                    method: 'PATCH',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(changed)
-                });
-                if (!r.ok) throw new Error(await r.text());
+                const result = await finishSettingsPatch(changed);
+                if (!result.ok) { this.disabled = false; return; }  // needs_confirm：弹窗已打开，按钮先恢复可点
                 savedSettings = Object.assign({}, localSettings, {reference_files: localSettings.reference_files.slice()});
                 settingsDirty = false;
                 M.toast({html: '设置已保存', classes: 'indigo'});
                 checkDirty();
-                // Refresh timestamps so stale badges update immediately
-                const tr = await fetch(`/writing/tasks/${TASK_ID}`);
-                if (tr.ok) {
-                    const td = await tr.json();
-                    taskTimestamps = {
-                        outline_updated_at: td.outline_updated_at || null,
-                        toc_updated_at: td.toc_updated_at || null,
-                    };
-                    renderSectionsContent();
-                }
+                renderSectionsContent();
             } catch (e) {
                 M.toast({html: '保存失败：' + e.message, classes: 'red'});
                 this.disabled = false;
@@ -2842,6 +3013,16 @@
         });
 
         M.Modal.init(document.getElementById('modal-del-writing'));
+        M.Modal.init(document.getElementById('modal-reconcile-confirm'));
+        M.Modal.init(document.getElementById('modal-outline-review'));
+        document.getElementById('btn-outline-review-section').addEventListener('click', async function () {
+            M.Modal.getInstance(document.getElementById('modal-outline-review')).close();
+            try { await applyOutlineReview('section'); } catch (e) { M.toast({html: '调整失败：' + e.message, classes: 'red'}); }
+        });
+        document.getElementById('btn-outline-review-overall').addEventListener('click', async function () {
+            M.Modal.getInstance(document.getElementById('modal-outline-review')).close();
+            try { await applyOutlineReview('overall'); } catch (e) { M.toast({html: '调整失败：' + e.message, classes: 'red'}); }
+        });
         M.Modal.init(document.getElementById('modal-regen-image-prompt'));
         document.getElementById('btn-confirm-regen-image-prompt').addEventListener('click', async function() {
             const target = _pendingRegenSectionImage;
@@ -2868,6 +3049,32 @@
                 }
             } catch(e) {
                 M.toast({ html: '删除失败：' + e.message, classes: 'red' });
+            }
+        });
+        document.getElementById('btn-confirm-reconcile').addEventListener('click', async function () {
+            const m = M.Modal.getInstance(document.getElementById('modal-reconcile-confirm'));
+            if (pendingOutlineReviewRetry) {
+                const retry = pendingOutlineReviewRetry;
+                pendingOutlineReviewRetry = null;
+                if (m) m.close();
+                await retry();
+                return;
+            }
+            if (!pendingReconcilePatch) return;
+            const payload = Object.assign({}, pendingReconcilePatch, {confirm_reconcile: true});
+            pendingReconcilePatch = null;
+            if (m) m.close();
+            try {
+                const result = await finishSettingsPatch(payload);
+                if (result.ok) {
+                    savedSettings = Object.assign({}, localSettings, {reference_files: localSettings.reference_files.slice()});
+                    settingsDirty = false;
+                    checkDirty();
+                    if (sections.length > 0) showSectionsView();
+                    M.toast({html: '已确认并保存', classes: 'indigo'});
+                }
+            } catch (e) {
+                M.toast({html: '保存失败：' + e.message, classes: 'red'});
             }
         });
     });

@@ -396,6 +396,13 @@
       style: buildStyleSpec(),
       center: s.camera.center, zoom: s.camera.zoom, pitch: s.camera.pitch || 0, bearing: s.camera.bearing || 0,
       maxPitch: 85, attributionControl: true, renderWorldCopies: false,
+      // 「下载图片」要读 map.getCanvas() 的像素——WebGL 默认每帧画完就可能清空后台缓冲区，
+      // 不开这个的话导出经常是黑图/空图，开销可接受（编辑器场景不是高频渲染的游戏画布）。
+      // 注意：这份 vendor 的 MapLibre 版本不认顶层 preserveDrawingBuffer，得塞进
+      // canvasContextAttributes 里才会真正传给 WebGL 上下文创建参数（见 sh 默认项：
+      // canvasContextAttributes:{antialias,preserveDrawingBuffer,...}）——顶层传值会被
+      // 静默忽略，之前就是踩了这个坑，导致下载图片一直读到清空后的空缓冲区。
+      canvasContextAttributes: { preserveDrawingBuffer: true },
     });
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
 
@@ -644,6 +651,7 @@
       a.click();
       URL.revokeObjectURL(a.href);
     });
+    document.getElementById("btn-download-image").addEventListener("click", downloadMapImage);
     document.getElementById("btn-paste-json").addEventListener("click", function () {
       document.getElementById("paste-json-text").value = "";
       M.Modal.getInstance(document.getElementById("modal-paste-json")).open();
@@ -657,6 +665,130 @@
   }
 
   function exportPreset() { return { id: doc && doc.id, label: doc && doc.name, version: 3, style: preset.style, annotations: preset.annotations }; }
+
+  // ============ 下载图片：地图画布 + 点/线/标注合成导出 ============
+  // 连线 / 箭头 / 连线名称标注早就是 MapLibre 的样式图层，和卫星底图、地形一起画在
+  // map 自己的 WebGL canvas 里，直接 drawImage 那块 canvas 就有了。真正麻烦的是点位——
+  // 点位的形状 + 名称标注（含信息框、前缀、八方位摆放）是 DOM 覆盖层（maplibregl.Marker），
+  // 不在 canvas 里。与其在这另起一套 canvas 绘图代码重新实现一遍形状/flex 布局/文字换行
+  // （很容易和 CSS 实际效果对不上，且后续 CSS 一改这里也要跟着改），不如直接把这批 marker
+  // 的 DOM 原样序列化进一个 SVG foreignObject 再光栅化成图——用的还是浏览器真正的排版引擎，
+  // 天然和屏幕上看到的一致，不用维护第二套样式逻辑。
+  function collectMarkerHtml() {
+    var nodes = document.querySelectorAll("#maplibre-map .maplibregl-marker");
+    var html = "";
+    nodes.forEach(function (m) {
+      if (m.querySelector(".link-handle")) return;   // 连线端点拖拽手柄是编辑器专用 UI，不导出
+      var clone = m.cloneNode(true);
+      var inner = clone.querySelector(".map-pt");
+      if (inner) inner.classList.remove("sel", "in-group");   // 选中态高亮不算地图内容
+      // 前缀图标是内嵌 <svg>：页面里直接渲染时，HTML 解析器的"外来内容"规则会自动把它
+      // 归进 SVG 命名空间，不用显式写 xmlns 也没事；但这里要把它序列化成字符串、塞进
+      // 我们自己拼的 XML 文档重新解析，没有 xmlns 兜底就是身份不明的标签，容易被直接
+      // 吞掉——图标凭空消失，文字/颜色/边框这些不需要命名空间的部分则不受影响。
+      clone.querySelectorAll("svg").forEach(function (svgEl) {
+        if (!svgEl.getAttribute("xmlns")) svgEl.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      });
+      html += clone.outerHTML;
+    });
+    return html;
+  }
+  var _mapCssTextCache = null;
+  function loadMapCssText() {
+    if (_mapCssTextCache) return Promise.resolve(_mapCssTextCache);
+    var link = document.querySelector('link[href*="/static/css/map.css"]');
+    if (!link) return Promise.reject(new Error("map.css <link> not found"));
+    return fetch(link.href).then(function (r) { return r.text(); }).then(function (t) {
+      _mapCssTextCache = t;
+      return t;
+    });
+  }
+  function downloadMapImage() {
+    if (!map) { toast("地图还没加载好", "orange darken-2"); return; }
+    var container = document.getElementById("maplibre-map");
+    var cssW = container.clientWidth, cssH = container.clientHeight;
+    var mapCanvas = map.getCanvas();
+    var pxW = mapCanvas.width, pxH = mapCanvas.height;
+    var dpr = pxW / cssW;
+    loadMapCssText().then(function (cssText) {
+      var markerHtml = collectMarkerHtml();
+      // SVG 是 XML，<style> 里的内容如果直接拼进去，CSS 注释里任何一个裸的 "<"（哪怕只是
+      // 注释里提到的一个 HTML 标签名，比如 "<span>"）都会被当成 XML 标签开头解析，
+      // 导致整份 SVG 解析失败（Image 直接 onerror）。用 CDATA 把这段文本当纯文本包起来；
+      // CDATA 自身不能包含 "]]>"，真遇到就按标准写法拆成两段 CDATA 拼接。
+      var cssCdata = (".maplibregl-marker{left:0;position:absolute;top:0;will-change:transform}" + cssText)
+        .replace(/]]>/g, "]]]]><![CDATA[>");
+      // foreignObject 内部按 CSS 像素排布（和 marker 自带的 translate(...) 坐标系一致），
+      // 外层用 scale(dpr) 整体放大到设备像素分辨率，导出图和底图 canvas 一样清晰不糊。
+      var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + pxW + '" height="' + pxH + '">' +
+        '<foreignObject width="100%" height="100%">' +
+        '<div xmlns="http://www.w3.org/1999/xhtml" style="width:' + cssW + 'px;height:' + cssH + 'px;' +
+        'transform:scale(' + dpr + ');transform-origin:0 0;position:relative;overflow:visible;">' +
+        '<style><![CDATA[' + cssCdata + ']]></style>' +
+        markerHtml +
+        '</div></foreignObject></svg>';
+      var img = new Image();
+      img.onload = function () {
+        var out = document.createElement("canvas");
+        out.width = pxW; out.height = pxH;
+        var ctx = out.getContext("2d");
+        var c = preset.style.css || {};
+        var cssOn = c.enabled !== false;
+
+        // 1) 底图：套上和屏幕上一致的「做旧」滤镜——applyCssOverlays() 把这份 sepia/
+        //    饱和度/对比度/亮度/色相旋转挂在 <canvas> 元素自己的 CSS filter 上，不在
+        //    canvas 的像素数据里，drawImage 读到的是滤镜前的原始像素，这里用 ctx.filter
+        //    （和 CSS filter 同语法）补回同一份效果，否则导出图会明显比屏幕上更「生」。
+        ctx.filter = cssOn
+          ? "sepia(" + (c.sepia || 0) + ") saturate(" + (c.saturate || 1) + ") contrast(" + (c.contrast || 1) +
+            ") brightness(" + (c.brightness || 1) + ") hue-rotate(" + (c.hueRotate || 0) + "deg)"
+          : "none";
+        ctx.drawImage(mapCanvas, 0, 0);
+        ctx.filter = "none";
+
+        // 2) 点位 + 名称标注（DOM 覆盖层）
+        ctx.drawImage(img, 0, 0, pxW, pxH);
+
+        // 3) 暖色调叠层（#map-warm-tint，mix-blend-mode:soft-light）。它在页面里 z-index
+        //    比地图容器高，会连点位一起罩上去，所以要画在点位之后，不是之前。
+        if (cssOn && (c.warmTintAlpha || 0) > 0) {
+          ctx.save();
+          ctx.globalCompositeOperation = "soft-light";
+          ctx.globalAlpha = c.warmTintAlpha;
+          ctx.fillStyle = c.warmTintColor || "#9a8868";
+          ctx.fillRect(0, 0, pxW, pxH);
+          ctx.restore();
+        }
+
+        // 4) 暗角（#map-main::after 的 radial-gradient，z-index 全场最高，同样盖住点位）。
+        //    CSS 里是「ellipse at center」，canvas 原生渐变只有正圆，用 scale 把坐标系
+        //    压成和画布同比例，画出来的圆在还原后就是贴合画布长宽比的椭圆。
+        var vs = cssOn ? (c.vignetteStrength || 0) : 0;
+        if (vs > 0) {
+          ctx.save();
+          ctx.translate(pxW / 2, pxH / 2);
+          ctx.scale(pxW / 2, pxH / 2);
+          var grad = ctx.createRadialGradient(0, 0, 0.55, 0, 0, 1.3);
+          grad.addColorStop(0, "rgba(0,0,0,0)");
+          grad.addColorStop(1, "rgba(0,0,0," + vs + ")");
+          ctx.fillStyle = grad;
+          ctx.fillRect(-1, -1, 2, 2);
+          ctx.restore();
+        }
+
+        out.toBlob(function (blob) {
+          if (!blob) { toast("图片导出失败", "red darken-1"); return; }
+          var a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = (doc && doc.name || "map") + ".png";
+          a.click();
+          URL.revokeObjectURL(a.href);
+        }, "image/png");
+      };
+      img.onerror = function () { toast("图片导出失败（合成标注层出错）", "red darken-1"); };
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    }, function () { toast("图片导出失败（加载样式失败）", "red darken-1"); });
+  }
 
   function setView(mode) {
     var next = mode === "globe" ? "globe" : "map";
@@ -1119,12 +1251,45 @@
     ["station", "驿站"], ["mountain", "山"], ["river", "水"],
   ];
 
+  // 名称标注（含信息框）相对点位的方位：4 正方向 + 4 对角，CSS 里 .map-pt-badge.pos-* 落地。
+  // LABEL_POS_GRID 按 3x3 网格排布给方位选择器用，null = 中间那格（点位本身所在的位置，不可选）。
+  var LABEL_POS_LABELS = {
+    "top-left": "左上", top: "上", "top-right": "右上",
+    left: "左", right: "右",
+    "bottom-left": "左下", bottom: "下", "bottom-right": "右下",
+  };
+  var LABEL_POS_GRID = [
+    ["top-left", "↖"], ["top", "↑"], ["top-right", "↗"],
+    ["left", "←"], null, ["right", "→"],
+    ["bottom-left", "↙"], ["bottom", "↓"], ["bottom-right", "↘"],
+  ];
+  var LABEL_POS_VALUES = Object.keys(LABEL_POS_LABELS);
+  // 标注和点位的间距（px），对应 CSS 的 --pos-gap；CSS 里 var(--pos-gap, 4px) 的兜底值
+  // 保持一致，只是给「还没升级过 label 结构的旧数据」在 JS 侧也有个明确默认值。
+  var LABEL_MARGIN_DEFAULT = 4;
+  function posPicker(val, on) {
+    var wrap = document.createElement("div"); wrap.className = "pos-picker";
+    LABEL_POS_GRID.forEach(function (opt) {
+      if (!opt) { var dot = document.createElement("span"); dot.className = "pos-picker-dot"; wrap.appendChild(dot); return; }
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "pos-picker-btn" + (opt[0] === val ? " active" : "");
+      btn.textContent = opt[1];
+      btn.title = LABEL_POS_LABELS[opt[0]];
+      btn.addEventListener("click", function () { on(opt[0]); });
+      wrap.appendChild(btn);
+    });
+    return wrap;
+  }
+
   // 归一化 / 迁移 pt.label（旧数据只有 {show,color}）
   function ensureLabel(pt) {
     var L = pt.label || {};
     if (typeof L.show !== "boolean") L.show = true;
     if (!L.fontSize) L.fontSize = 13;
     if (!L.color) L.color = "#3a2a18";
+    if (!L.pos || LABEL_POS_VALUES.indexOf(L.pos) < 0) L.pos = "bottom";
+    if (L.margin == null) L.margin = LABEL_MARGIN_DEFAULT;
     L.box = L.box || {};
     if (typeof L.box.show !== "boolean") L.box.show = true;
     if (!L.box.bg) L.box.bg = "#f4ecd8";
@@ -1158,7 +1323,8 @@
     var L = ensureLabel(pt);
     if (L.show) {
       var badge = document.createElement("div");
-      badge.className = "map-pt-badge" + (L.box.show ? " boxed" : "");
+      badge.className = "map-pt-badge pos-" + L.pos + (L.box.show ? " boxed" : "");
+      badge.style.setProperty("--pos-gap", (L.margin == null ? LABEL_MARGIN_DEFAULT : L.margin) + "px");
       if (L.box.show) badge.style.borderColor = L.box.border;
 
       if (L.prefix.type === "icon" || L.prefix.type === "text") {
@@ -1340,6 +1506,8 @@
     var L = ensureLabel(pt);
     frag.appendChild(inlineField("显示名称标注", chk(L.show, function (v) { L.show = v; renderPoints(); renderEditor(); renderList(); scheduleSave(); })));
     if (L.show) {
+      frag.appendChild(field("标注方位", posPicker(L.pos, function (v) { L.pos = v; renderPoints(); renderEditor(); scheduleSave(); })));
+      frag.appendChild(field("标注间距（像素）", num(L.margin, 0, 60, 1, function (v) { L.margin = v; renderPoints(); scheduleSave(); })));
       frag.appendChild(field("名称字号", num(L.fontSize, 9, 28, 1, function (v) { L.fontSize = v; renderPoints(); scheduleSave(); })));
       frag.appendChild(field("名称文字色", col(L.color, function (v) { L.color = v; renderPoints(); scheduleSave(); })));
 
@@ -1422,6 +1590,9 @@
   // 不在渲染时做任何叠加/继承。之后单独改某个点 / 线也照常生效，反过来会让组值“过时”——
   // 这是允许的：两者没有优先级，组的意义只是“一次改一批”。组值只在打开组面板时用来回显
   // 与“应用到全部成员”，永远不会在加载时自动重放（否则组就变成了有优先级的样式层）。
+  // 标注方位（labelPos）和标注间距（labelMargin）故意不进这份组公共属性：这两个是每个点位
+  // 自己的摆放微调，不是"一批点该长一个样"的样式（换个方向/间距很可能是为了给彼此让位置，
+  // 组内不同成员的需求正好相反），所以只在点位自己的属性面板调，组属性/组统一修改都不碰它们。
   var GROUP_PROP_DEFAULTS = {
     markerColor: "#b8442e", labelColor: "#3a2a18", boxBg: "#f4ecd8", boxBorder: "#b89562",
     nameFontSize: 13, prefixBg: "#b8442e", prefixFg: "#ffffff", prefixFontSize: 12,

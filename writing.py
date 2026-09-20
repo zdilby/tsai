@@ -31,7 +31,10 @@ from backend.db import (
     get_user_processed_files,
     get_writing_sections,
     get_writing_section,
-    upsert_writing_sections,
+    reconcile_writing_sections,
+    sync_task_derived_texts,
+    backfill_missing_sub_outlines,
+    touch_section_generated_at,
     update_writing_section,
     delete_writing_section,
     get_writing_section_images,
@@ -286,6 +289,7 @@ class UpdateWritingTaskRequest(BaseModel):
     outline: Optional[str] = None
     toc: Optional[str] = None
     reference_files: Optional[list[str]] = None
+    confirm_reconcile: bool = False
 
 
 class SaveWritingContentRequest(BaseModel):
@@ -298,6 +302,14 @@ class UpdateSectionRequest(BaseModel):
     content: Optional[str] = None
     word_count_target: Optional[int] = None
     status: Optional[str] = None
+
+
+class ApplyOutlineReviewRequest(BaseModel):
+    scope: str   # "section" | "overall"
+    section_suggestion: Optional[str] = None
+    overall_suggestion: Optional[str] = None
+    retrofits: list[dict] = []
+    confirm_reconcile: bool = False   # 仅 scope="overall" 触发 >3 高风险确认时，前端二次提交用
 
 
 class GenerateImagePromptRequest(BaseModel):
@@ -355,21 +367,49 @@ async def get_task(task_id: str, user: dict = Depends(require_write_access)):
 @writing_router.patch("/tasks/{task_id}")
 async def patch_task(task_id: str, payload: UpdateWritingTaskRequest, user: dict = Depends(require_write_access)):
     await _ensure_task_owner(task_id, user["id"])
-    data = payload.dict(exclude_none=True)
-    if data:
-        await update_writing_task(task_id, user["id"], **data)
-    # Sync sections when TOC is saved
-    if payload.toc is not None:
-        task = await get_writing_task(task_id, user["id"])
+    data = payload.dict(exclude_none=True, exclude={"confirm_reconcile"})
+
+    # 目录/大纲不再直接落库原始文本——writing_sections 才是权威源，两个字段都是
+    # 从它派生、reconcile 结束后重新拼接写回的产物（sync_task_derived_texts）。
+    # outline 信息量更全（同时带着每段的 sub_outline），如果这次请求里两个字段都
+    # 出现（比如"保存设置"一次性提交了都改过的目录和大纲），以 outline 为准，
+    # toc 原始文本不再单独处理。
+    reconcile_result = None
+    data.pop("outline", None)
+    data.pop("toc", None)
+    if payload.outline is not None:
+        parsed = _parse_outline_sections(payload.outline)
+        if parsed:
+            new_headings = [h[3:].strip() if h.startswith("## ") else h.strip() for h, _ in parsed]
+            new_sub_outlines = [body for _, body in parsed]
+            reconcile_result = await reconcile_writing_sections(
+                task_id, new_headings, new_sub_outlines, confirm=payload.confirm_reconcile,
+            )
+        else:
+            # 引导阶段：还没有可解析的 "## " 标题结构（用户在写没分章节的草稿），
+            # 原样存文本，不触发 sections 同步，避免把随手写的笔记当成"清空所有章节"。
+            data["outline"] = payload.outline
+    if reconcile_result is None and payload.toc is not None:
         headings = _parse_toc(payload.toc)
         if headings:
-            wc = (task["word_count"] if task else 0) or 0
-            per_sec = wc // len(headings) if wc > 0 else 0
-            await upsert_writing_sections(task_id, [
-                {"heading": h, "sub_outline": "", "word_count_target": per_sec}
-                for h in headings
-            ])
-    return {"success": True}
+            reconcile_result = await reconcile_writing_sections(
+                task_id, headings, None, confirm=payload.confirm_reconcile,
+            )
+        else:
+            data["toc"] = payload.toc
+
+    if reconcile_result is not None and reconcile_result["needs_confirm"]:
+        if data:
+            await update_writing_task(task_id, user["id"], **data)
+        return {"success": False, "needs_confirm": True, "reconcile_preview": reconcile_result}
+
+    if data:
+        await update_writing_task(task_id, user["id"], **data)
+
+    resp = {"success": True}
+    if reconcile_result is not None:
+        resp["reconcile"] = reconcile_result
+    return resp
 
 
 @writing_router.delete("/tasks/{task_id}")
@@ -810,9 +850,38 @@ async def patch_section(
     data = payload.dict(exclude_none=True)
     if not data:
         return {"success": True}
+
+    # 正文首行 "## 标题" 就是这个段落的标题——这本来就是生成时的既有约定（prompt
+    # 要求"直接输出含 ## 章节标题的完整章节"），这里补上"编辑正文时反向同步回
+    # heading 字段"这一环。只在调用方没有显式传 heading 时才自动推断，不覆盖
+    # 显式指定的值。单段改名是无歧义的 1:1 对应，不跑目录/大纲那套批量对齐算法，
+    # 也不触发"超过3个无法对应"的确认阈值。
+    heading_synced = None
+    if "content" in data and "heading" not in data:
+        section = await get_writing_section(section_id, task_id)
+        if not section:
+            raise HTTPException(status_code=404, detail="段落不存在")
+        first_line = (data["content"].splitlines() or [""])[0]
+        m = re.match(r'^##\s+(.+?)\s*$', first_line)
+        if m:
+            new_heading = m.group(1).strip()
+            if new_heading and new_heading != section["heading"]:
+                # 必须在改 heading 之前回填：backfill 是按"当前（旧）标题"去匹配
+                # writing_tasks.outline 里的历史内容，heading 一旦先改掉，这一行
+                # 就再也找不到自己原来的细纲文本了（见 backfill_missing_sub_outlines 注释）。
+                await backfill_missing_sub_outlines(task_id)
+                data["heading"] = new_heading
+                heading_synced = {"old": section["heading"], "new": new_heading}
+
     if not await update_writing_section(section_id, task_id, **data):
         raise HTTPException(status_code=404, detail="段落不存在")
-    return {"success": True}
+    if heading_synced:
+        await sync_task_derived_texts(task_id)
+        # sync_task_derived_texts 把 outline_updated_at/toc_updated_at 打成了一个比
+        # 上面这次保存更晚的 NOW()——不重新戳一下本段的 last_generated_at，前端
+        # isSectionStale() 会把这次改名本身误判成"大纲改了、这段过期了"。
+        await touch_section_generated_at(section_id, task_id)
+    return {"success": True, "heading_synced": heading_synced}
 
 
 _SECTION_IMAGE_CONTENT_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
@@ -944,6 +1013,108 @@ async def upload_section_image(
     return {"image_url": "/" + relative_path, "marker_text": marker_text}
 
 
+_OUTLINE_DRIFT_PROMPT_TMPL = """你是长文写作的大纲维护助手。下面是一篇正在分段撰写的文章，包含大纲全文，以及目前每一章节的真实状态（已经写出正文的章节，用真实内容代表该章节；还没写的章节，用它当前的大纲片段代表）。
+
+文章标题：{title}
+完整大纲：
+{outline}
+
+各章节当前状态：
+{sections_state}
+
+其中"{current_heading}"是刚刚生成完成的章节，请判断：结合已经真实写出的内容（包括可能被人工编辑过、和原大纲已经不完全一致的章节），当前的大纲是否需要调整才能准确反映文章实际的发展方向和已写内容？
+
+要求：
+- 优先只调整"{current_heading}"自己的细纲；只有确有必要（比如已写内容改变了后续章节的走向、顺序或数量）才建议调整整体大纲。
+- 如果某个别的章节已经有正文，但它的细纲明显不再匹配这段正文的实际内容，请在"其它段落大纲回填"里指出——只改那个章节的大纲描述，不要改写它的正文。
+- 列出其它段落时，"标题"必须和上面给出的原文一字不差地复制，用于程序匹配，不要意译、不要改写、不要加书名号等多余字符。
+- 如果完全不需要调整，第一行直接写"需要调整：否"，后面的字段都写"无"。
+
+严格按以下格式输出，不要有多余的解释文字：
+需要调整：是/否
+本段大纲建议：<"{current_heading}"新的细纲文本；不需要调整就写"无">
+整体大纲需要调整：是/否
+整体大纲建议：<完整的新大纲全文，含所有章节的 "## 标题" 和细纲；不需要调整就写"无">
+其它段落大纲回填：
+- 标题：<原文一字不差的标题> | 新大纲：<该章节新的细纲>
+（没有就整节写"无"）"""
+
+
+async def _check_outline_drift(
+    task: dict, all_secs: list[dict], current_section_id: str, current_heading: str, current_content: str,
+) -> dict | None:
+    """段落生成完成后的一次性大纲一致性检查。
+
+    结合每个章节的真实状态（有内容的用真实内容代表，没内容的用它当前的大纲片段代表），
+    判断大纲是否需要调整来匹配已经写出/编辑过的实际内容。解析失败、模型判定不需要
+    调整、或调用异常，一律返回 None——这一步是可选的锦上添花，绝不能影响本次生成
+    已经成功保存的正文，调用方需要自己 try/except 包一层。
+    """
+    state_parts = []
+    for s in all_secs:
+        if s["id"] == current_section_id:
+            continue
+        if (s.get("content") or "").strip():
+            state_parts.append(f"## {s['heading']}\n[实际内容]\n{s['content'][:3000]}")
+        else:
+            state_parts.append(f"## {s['heading']}\n[大纲]\n{s.get('sub_outline') or '（无）'}")
+    state_parts.append(f"## {current_heading}\n[刚生成的内容]\n{current_content[:3000]}")
+
+    prompt = _OUTLINE_DRIFT_PROMPT_TMPL.format(
+        title=task.get("title", ""),
+        outline=task.get("outline", ""),
+        sections_state="\n\n".join(state_parts),
+        current_heading=current_heading,
+    )
+    resp = await client.aio.models.generate_content(
+        model=settings.generation_model, contents=prompt,
+        config=gtypes.GenerateContentConfig(max_output_tokens=8192),
+    )
+    text = resp.text or ""
+
+    m = re.search(r'需要调整[：:]\s*(是|否)', text)
+    if not m or m.group(1) != "是":
+        return None
+
+    def _extract(label: str, next_labels: list[str]) -> str | None:
+        if next_labels:
+            pattern = rf'{label}[：:]\s*\n?([\s\S]*?)(?=\n(?:{"|".join(next_labels)})[：:])'
+        else:
+            pattern = rf'{label}[：:]\s*\n?([\s\S]*)$'
+        mm = re.search(pattern, text)
+        val = mm.group(1).strip() if mm else ""
+        return None if (not val or val == "无") else val
+
+    section_suggestion = _extract("本段大纲建议", ["整体大纲需要调整"])
+    overall_needed_m = re.search(r'整体大纲需要调整[：:]\s*(是|否)', text)
+    overall_suggestion = None
+    if overall_needed_m and overall_needed_m.group(1) == "是":
+        overall_suggestion = _extract("整体大纲建议", ["其它段落大纲回填"])
+
+    retrofits = []
+    heading_to_id = {s["heading"]: str(s["id"]) for s in all_secs}
+    retro_block = _extract("其它段落大纲回填", [])
+    if retro_block:
+        for line in retro_block.splitlines():
+            line = line.strip().lstrip("-").strip()
+            mm = re.match(r'标题[：:]\s*(.+?)\s*\|\s*新大纲[：:]\s*(.+)$', line)
+            if not mm:
+                continue
+            h, new_sub = mm.group(1).strip(), mm.group(2).strip()
+            sid = heading_to_id.get(h)
+            if sid and sid != current_section_id:
+                retrofits.append({"section_id": sid, "heading": h, "new_sub_outline": new_sub})
+
+    if not section_suggestion and not overall_suggestion and not retrofits:
+        return None
+    return {
+        "section_id": current_section_id,
+        "section_suggestion": section_suggestion,
+        "overall_suggestion": overall_suggestion,
+        "retrofits": retrofits,
+    }
+
+
 @writing_router.post("/tasks/{task_id}/sections/{section_id}/generate")
 async def generate_section_content(
     task_id: str,
@@ -970,13 +1141,14 @@ async def generate_section_content(
         )
         rag_text = "\n".join(r["content"] for r in rag_results)
 
-    # Previous section's tail for continuity
+    # Previous section's full content for continuity——不再只取结尾 800 字：段落可能被
+    # 人工编辑过，实际内容才是权威的衔接依据，摘要容易漏掉编辑后才加进去的关键信息。
     all_secs = await get_writing_sections(task_id)
     idx = section["section_index"]
-    prev_tail = ""
+    prev_full = ""
     for s in all_secs:
         if s["section_index"] < idx and s.get("content"):
-            prev_tail = s["content"][-800:]
+            prev_full = s["content"]
 
     wc_target = section.get("word_count_target") or 0
     if wc_target == 0:
@@ -986,7 +1158,10 @@ async def generate_section_content(
     heading = section["heading"]
     sub_outline = section.get("sub_outline") or ""
     sec_outline = (f"## {heading}\n{sub_outline}").strip() if sub_outline else f"## {heading}"
-    context_hint = f"\n前一段落结尾（仅供衔接参考，勿重复）：\n...{prev_tail}" if prev_tail else ""
+    context_hint = (
+        f"\n上一段落的完整实际内容（务必据此衔接；如果它与上面\"完整大纲\"的描述有出入，"
+        f"以这段实际内容为准——大纲仅供参考，可能因为人工编辑没有同步更新）：\n{prev_full}"
+    ) if prev_full else ""
 
     _skills = (task.get("style_skills") or "").strip()
     _style_block = (
@@ -1021,6 +1196,21 @@ async def generate_section_content(
         full_content = "".join(accumulated)
         if full_content:
             await update_writing_section(section_id, task_id, content=full_content, status="draft")
+            # 只有任务里已经有别的段落带着真实内容时，才值得检查大纲是不是该跟进——
+            # 第一次生成（其它段落都还是空的）没有可比对的对象，跳过省一次调用。
+            other_have_content = any(
+                s["id"] != section_id and (s.get("content") or "").strip() for s in all_secs
+            )
+            if other_have_content:
+                try:
+                    outline_review = await _check_outline_drift(
+                        task, all_secs, section_id, heading, full_content,
+                    )
+                except Exception as e:
+                    outline_review = None
+                    logger.warning("大纲一致性检查失败（不影响本次生成）：%s", e)
+                if outline_review:
+                    yield f"data: {json.dumps({'type': 'outline_review', **outline_review}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1028,6 +1218,55 @@ async def generate_section_content(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/apply_outline_review")
+async def apply_outline_review(
+    task_id: str,
+    section_id: str,
+    payload: ApplyOutlineReviewRequest,
+    user: dict = Depends(require_write_access),
+):
+    """应用 _check_outline_drift 提出的大纲调整建议（见 generate_section_content）。
+
+    回填其它段落（retrofits）只改它们的 sub_outline，绝不碰 content/status——那些
+    段落的正文可能是人工编辑过的，内容永远以人工编辑为准，这里只是让大纲的描述
+    跟上已经写好的真实内容。
+    """
+    await _ensure_task_owner(task_id, user["id"])
+    if not await get_writing_section(section_id, task_id):
+        raise HTTPException(status_code=404, detail="段落不存在")
+
+    for r in payload.retrofits:
+        sid = r.get("section_id")
+        if sid and sid != section_id:
+            await update_writing_section(sid, task_id, sub_outline=r.get("new_sub_outline", ""))
+
+    if payload.scope == "section":
+        if payload.section_suggestion is not None:
+            await update_writing_section(section_id, task_id, sub_outline=payload.section_suggestion)
+        outline_text, toc_text = await sync_task_derived_texts(task_id)
+        # sync_task_derived_texts 打了一个比这次改动更晚的 outline_updated_at/
+        # toc_updated_at；不重新戳一下本段的 last_generated_at，isSectionStale()
+        # 会把这次"应用建议"本身误判成"大纲改了、这段过期了"（同 patch_section）。
+        await touch_section_generated_at(section_id, task_id)
+        return {"success": True, "outline": outline_text, "toc": toc_text}
+
+    if payload.scope != "overall":
+        raise HTTPException(status_code=400, detail="scope 必须是 section 或 overall")
+
+    # scope == "overall"：复用已有的整篇大纲协调管线（标题重排/改名的对齐算法，以及
+    # 现成的 >3 高风险归档确认网关）——一次 AI 提议的整体重写不该比人工编辑更值得信任，
+    # 所以不跳过这道阈值检查。
+    parsed = _parse_outline_sections(payload.overall_suggestion or "")
+    if not parsed:
+        raise HTTPException(status_code=400, detail="整体大纲解析失败（未识别到任何 \"## \" 标题），未做任何修改")
+    headings = [h[3:].strip() for h, _ in parsed]
+    bodies = [b for _, b in parsed]
+    result = await reconcile_writing_sections(task_id, headings, bodies, confirm=payload.confirm_reconcile)
+    if result["needs_confirm"]:
+        return {"success": False, "needs_confirm": True, "reconcile_preview": result}
+    return {"success": True, "reconcile": result}
 
 
 @writing_router.post("/tasks/{task_id}/sections/{section_id}/format")

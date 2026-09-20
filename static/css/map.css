@@ -391,12 +391,13 @@ body { overflow: hidden; background: #fff; }
 /* 端点与点位重合时，手柄所在的 marker 容器压在点位之上，优先被抓取 */
 .maplibregl-marker:has(.link-handle) { z-index: 5; }
 /* 名称标注：徽章样式（可选信息框 + 可选前缀元素），参考 static/images/map_demo.png。
-   绝对定位挂在点的正下方居中，尺寸变化不影响 .map-pt 盒子、不动锚点。 */
+   绝对定位挂在点的外面，尺寸变化不影响 .map-pt 盒子、不动锚点。具体挂在哪个方位由
+   .pos-* 类决定（八个方位，见下）——.map-pt 只包住 shape 本身，百分比坐标都是相对
+   shape 的盒子算的，所以方位规则和点位大小（size）无关，任意 size 下都对齐一致。
+   和点位的间距是 --pos-gap 这个自定义属性（JS 按 pt.label.margin 挂在 badge 自己的
+   inline style 上，每个点位可以各自不同），默认 4px 是 var() 的兜底值，不靠 CSS 写死。 */
 .map-pt-badge {
     position: absolute;
-    top: calc(100% + 4px);
-    left: 50%;
-    transform: translateX(-50%);
     display: inline-flex;
     align-items: stretch;
     white-space: nowrap;
@@ -404,6 +405,16 @@ body { overflow: hidden; background: #fff; }
     font-weight: 600;
     max-width: 220px;
 }
+/* 四个基本方位：贴边居中，间隙 = --pos-gap（默认 4px） */
+.map-pt-badge.pos-top    { bottom: calc(100% + var(--pos-gap, 4px)); left: 50%; transform: translateX(-50%); }
+.map-pt-badge.pos-bottom { top: calc(100% + var(--pos-gap, 4px)); left: 50%; transform: translateX(-50%); }
+.map-pt-badge.pos-left   { right: calc(100% + var(--pos-gap, 4px)); top: 50%; transform: translateY(-50%); }
+.map-pt-badge.pos-right  { left: calc(100% + var(--pos-gap, 4px)); top: 50%; transform: translateY(-50%); }
+/* 四个对角方位：贴角外扩，两个方向都留 --pos-gap 间隙，不用 transform 居中 */
+.map-pt-badge.pos-top-left     { bottom: calc(100% + var(--pos-gap, 4px)); right: calc(100% + var(--pos-gap, 4px)); }
+.map-pt-badge.pos-top-right    { bottom: calc(100% + var(--pos-gap, 4px)); left: calc(100% + var(--pos-gap, 4px)); }
+.map-pt-badge.pos-bottom-left  { top: calc(100% + var(--pos-gap, 4px)); right: calc(100% + var(--pos-gap, 4px)); }
+.map-pt-badge.pos-bottom-right { top: calc(100% + var(--pos-gap, 4px)); left: calc(100% + var(--pos-gap, 4px)); }
 .map-pt-badge.boxed {
     border: 1px solid #b89562;
     border-radius: 4px;
@@ -454,6 +465,23 @@ body { overflow: hidden; background: #fff; }
 .grp-mem:last-child { border-bottom: none; }
 .grp-mem .swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(0,0,0,.15); }
 .grp-mem-nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: #444; }
+
+/* 名称标注方位选择器：3x3 网格，中间格空着（那是点位本身），八个方向各一个按钮 */
+.pos-picker {
+    display: grid; grid-template-columns: repeat(3, 22px); grid-template-rows: repeat(3, 22px);
+    gap: 2px;
+}
+.pos-picker-btn {
+    width: 22px; height: 22px; padding: 0; box-sizing: border-box;
+    border: 1px solid #ccc; border-radius: 3px; background: #fff;
+    font-size: 12px; line-height: 1; cursor: pointer; color: #555;
+}
+.pos-picker-btn:hover { background: #eef1fb; border-color: #5c6bc0; }
+.pos-picker-btn.active { background: #5c6bc0; border-color: #3949ab; color: #fff; }
+.pos-picker-dot {
+    width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+}
+.pos-picker-dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b8442e; }
 /* 之前误用了作用域限定在 #add-point-panel 下的 .annot-add-btn，这里挂不上那份样式、
    等于裸浏览器默认按钮。改成自带完整样式，配色/圆角/字号与「按坐标添加」「搜索」
    「＋ 新建组」等其他按钮保持一致（靛蓝实心，深色 hover）。 */

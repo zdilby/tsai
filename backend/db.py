@@ -1,6 +1,9 @@
+import difflib
 import json
 import os
 import uuid
+from collections import deque
+from dataclasses import dataclass, field
 from databases import Database
 from settings import settings
 from pgvector.asyncpg import register_vector, Vector
@@ -1361,59 +1364,262 @@ async def get_writing_section(section_id: str, task_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-async def upsert_writing_sections(task_id: str, sections: list[dict]) -> None:
-    """Sync writing_sections to a new ordered heading list (from TOC save).
+_RENAME_SIMILARITY_THRESHOLD = 0.3
+_RECONCILE_CONFIRM_THRESHOLD = 3
 
-    Matches existing rows by heading so re-saving a TOC with the same (or
-    reordered) titles keeps their content/status intact — only section_index,
-    and for not-yet-generated sections word_count_target, is refreshed.
-    Headings dropped from the new TOC are archived rather than deleted, so
-    generated content is never silently lost; a heading that reappears later
-    revives its archived row instead of starting over.
+
+@dataclass
+class _HeadingAlignment:
+    exact: list[tuple[int, int]] = field(default_factory=list)          # (pool_index, new_index)
+    renamed: list[tuple[int, int, float]] = field(default_factory=list)  # (pool_index, new_index, similarity)
+    deleted: list[int] = field(default_factory=list)                    # pool_index
+    inserted: list[int] = field(default_factory=list)                   # new_index
+
+
+def _align_headings(pool: list[dict], new_headings: list[str]) -> _HeadingAlignment:
+    """两阶段标题对齐：文本精确匹配（与位置无关）→ 剩余项按原相对顺序配对为"改名"。
+
+    pool: 该 task 下所有 writing_sections 行（含 archived），下标即结果里的 pool_index。
+    不能直接用位置对齐的 LCS——比如 [A,B,C] 纯重排成 [C,A,B]，标准 LCS（下标必须
+    单调递增）只能找到 [A,B]，会把纯重排误判成删除+新增。所以先做一遍与位置无关的
+    精确文本匹配（这一步就是原来 upsert_writing_sections 的核心能力：任意重排序/
+    新增/删除都不会误伤不变的标题），只有精确匹配剩下的项，位置信息才有意义、才
+    拿来配对"改名"——且必须过一道相似度阈值，防止把两个毫不相关的标题错配、
+    让新标题静默"继承"旧段落已经写好的正文和确认状态。
     """
-    existing = await database.fetch_all(
-        "SELECT id, heading, status, content FROM writing_sections WHERE task_id = :tid",
+    result = _HeadingAlignment()
+
+    active_order = [i for i, r in enumerate(pool) if r["status"] != "archived"]
+    archived_order = [i for i, r in enumerate(pool) if r["status"] == "archived"]
+    buckets: dict[str, deque] = {}
+    for i in active_order + archived_order:   # 同名时优先复用/复活"还活着"的那一行
+        buckets.setdefault(pool[i]["heading"], deque()).append(i)
+
+    consumed_old: set[int] = set()
+    consumed_new: set[int] = set()
+    for j, heading in enumerate(new_headings):
+        bucket = buckets.get(heading)
+        if bucket:
+            i = bucket.popleft()
+            result.exact.append((i, j))
+            consumed_old.add(i)
+            consumed_new.add(j)
+
+    leftover_old = [i for i in active_order if i not in consumed_old]
+    leftover_new = [j for j in range(len(new_headings)) if j not in consumed_new]
+    k = min(len(leftover_old), len(leftover_new))
+    for n in range(k):
+        i, j = leftover_old[n], leftover_new[n]
+        ratio = difflib.SequenceMatcher(None, pool[i]["heading"], new_headings[j]).ratio()
+        if ratio >= _RENAME_SIMILARITY_THRESHOLD:
+            result.renamed.append((i, j, ratio))
+        else:
+            result.deleted.append(i)
+            result.inserted.append(j)
+    result.deleted.extend(leftover_old[k:])
+    result.inserted.extend(leftover_new[k:])
+    return result
+
+
+async def reconcile_writing_sections(
+    task_id: str,
+    new_headings: list[str],
+    new_sub_outlines: list[str] | None = None,
+    confirm: bool = False,
+) -> dict:
+    """目录 / 大纲保存的统一协调入口（取代旧的 upsert_writing_sections）。
+
+    writing_sections 是唯一权威源，toc/outline 两个自由文本字段永远是从它派生、
+    重新拼接写回的产物（见 sync_task_derived_texts）。new_sub_outlines=None 表示
+    这次只是保存目录——只动 heading/section_index/归档/新建，已匹配（含改名）行
+    的 sub_outline 不动；传入等长列表表示保存大纲，连细纲一起同步。
+
+    先只读比对出这次会产生的变更；如果会导致超过 _RECONCILE_CONFIRM_THRESHOLD 个
+    "有实质内容"的段落找不到对应（既没精确匹配也配不成改名），且调用方还没有
+    confirm=True，直接返回 needs_confirm 预览、不写库——由前端弹窗确认后带
+    confirm=True 重新提交同一份数据。
+    """
+    await backfill_missing_sub_outlines(task_id)
+    pool_rows = await database.fetch_all(
+        "SELECT id, heading, status, content, sub_outline FROM writing_sections "
+        "WHERE task_id = :tid ORDER BY section_index",
         values={"tid": task_id},
     )
-    existing_by_heading = {row["heading"]: row for row in existing}
-    matched_ids = set()
+    pool = [dict(r) for r in pool_rows]
+    alignment = _align_headings(pool, new_headings)
 
-    for idx, sec in enumerate(sections):
-        heading = sec.get("heading", "")
-        match = existing_by_heading.get(heading)
-        if match:
-            matched_ids.add(match["id"])
-            sets = ["section_index = :idx", "updated_at = NOW()"]
-            values = {"idx": idx, "sid": match["id"]}
-            if not match["content"]:
-                sets.append("word_count_target = :wc")
-                values["wc"] = sec.get("word_count_target", 0)
-            if match["status"] == "archived":
-                sets.append("status = 'pending'")
-            await database.execute(
-                f"UPDATE writing_sections SET {', '.join(sets)} WHERE id = :sid",
-                values=values,
-            )
-        else:
-            await database.execute(
-                """INSERT INTO writing_sections
-                   (task_id, section_index, heading, sub_outline, word_count_target, status)
-                   VALUES (:tid, :idx, :heading, :sub_outline, :wc, 'pending')""",
-                values={
-                    "tid": task_id,
-                    "idx": idx,
-                    "heading": heading,
-                    "sub_outline": sec.get("sub_outline", ""),
-                    "wc": sec.get("word_count_target", 0),
-                },
-            )
+    def _had_content(i: int) -> bool:
+        row = pool[i]
+        return bool(row["content"]) or row["status"] != "pending"
 
-    stale_ids = [row["id"] for row in existing if row["id"] not in matched_ids and row["status"] != "archived"]
-    for sid in stale_ids:
+    risky = [i for i in alignment.deleted if _had_content(i)]
+    renamed_preview = [
+        {
+            "section_id": pool[i]["id"], "old_heading": pool[i]["heading"], "new_heading": new_headings[j],
+            "similarity": round(ratio, 3), "had_content": _had_content(i),
+        }
+        for i, j, ratio in alignment.renamed
+    ]
+    archived_preview = [
+        {"section_id": pool[i]["id"], "heading": pool[i]["heading"], "had_content": _had_content(i)}
+        for i in alignment.deleted
+    ]
+    inserted_preview = [{"heading": new_headings[j]} for j in alignment.inserted]
+
+    if not alignment.renamed and not alignment.deleted and not alignment.inserted:
+        order_before = [i for i, r in enumerate(pool) if r["status"] != "archived"]
+        order_after = [i for i, _j in sorted(alignment.exact, key=lambda p: p[1])]
+        sub_outline_unchanged = new_sub_outlines is None or all(
+            (new_sub_outlines[j] or "") == (pool[i]["sub_outline"] or "") for i, j in alignment.exact
+        )
+        if order_after == order_before and sub_outline_unchanged:
+            task = await database.fetch_one(
+                "SELECT outline, toc FROM writing_tasks WHERE id = :tid", values={"tid": task_id}
+            )
+            return {
+                "applied": True, "needs_confirm": False, "risky_archive_count": 0,
+                "renamed": [], "archived": [], "inserted": [],
+                "outline": task["outline"] if task else "", "toc": task["toc"] if task else "",
+            }
+
+    if len(risky) > _RECONCILE_CONFIRM_THRESHOLD and not confirm:
+        return {
+            "applied": False, "needs_confirm": True, "risky_archive_count": len(risky),
+            "threshold": _RECONCILE_CONFIRM_THRESHOLD,
+            "renamed": renamed_preview, "archived": archived_preview, "inserted": inserted_preview,
+        }
+
+    total_new = len(new_headings)
+    wc_task = await database.fetch_one(
+        "SELECT word_count FROM writing_tasks WHERE id = :tid", values={"tid": task_id}
+    )
+    wc_total = (wc_task["word_count"] if wc_task else 0) or 0
+    per_sec = (wc_total // total_new) if (wc_total > 0 and total_new) else 0
+
+    async def _apply_match(i: int, j: int):
+        row = pool[i]
+        sets = ["section_index = :idx", "heading = :heading", "updated_at = NOW()"]
+        values = {"idx": j, "heading": new_headings[j], "sid": row["id"]}
+        if not row["content"]:
+            sets.append("word_count_target = :wc")
+            values["wc"] = per_sec
+        if row["status"] == "archived":
+            sets.append("status = 'pending'")
+        if new_sub_outlines is not None:
+            sets.append("sub_outline = :sub_outline")
+            values["sub_outline"] = new_sub_outlines[j]
+        await database.execute(
+            f"UPDATE writing_sections SET {', '.join(sets)} WHERE id = :sid", values=values,
+        )
+
+    for i, j in alignment.exact:
+        await _apply_match(i, j)
+    for i, j, _ratio in alignment.renamed:
+        await _apply_match(i, j)
+    for j in alignment.inserted:
+        await database.execute(
+            """INSERT INTO writing_sections
+               (task_id, section_index, heading, sub_outline, word_count_target, status)
+               VALUES (:tid, :idx, :heading, :sub_outline, :wc, 'pending')""",
+            values={
+                "tid": task_id, "idx": j, "heading": new_headings[j],
+                "sub_outline": (new_sub_outlines[j] if new_sub_outlines is not None else ""),
+                "wc": per_sec,
+            },
+        )
+    for i in alignment.deleted:
         await database.execute(
             "UPDATE writing_sections SET status = 'archived', updated_at = NOW() WHERE id = :sid",
-            values={"sid": sid},
+            values={"sid": pool[i]["id"]},
         )
+
+    outline_text, toc_text = await sync_task_derived_texts(task_id)
+    return {
+        "applied": True, "needs_confirm": False, "risky_archive_count": len(risky),
+        "renamed": renamed_preview, "archived": archived_preview, "inserted": inserted_preview,
+        "outline": outline_text, "toc": toc_text,
+    }
+
+
+def _parse_outline_text_to_map(outline: str) -> dict[str, str]:
+    """把大纲自由文本按 "## " 切成 {标题: 正文} 字典（第一个标题之前的游离文字丢弃）。
+
+    逻辑和 writing.py:_parse_outline_sections 一致，这里单独实现一份纯文本版本，
+    避免 backend/db.py 反向 import writing.py 造成循环依赖。
+    """
+    sections: dict[str, str] = {}
+    current: str | None = None
+    lines: list[str] = []
+    for line in outline.splitlines():
+        if line.startswith("## "):
+            if current is not None:
+                sections[current] = "\n".join(lines).strip()
+            current = line[3:].strip()
+            lines = []
+        elif current is not None:
+            lines.append(line)
+    if current is not None:
+        sections[current] = "\n".join(lines).strip()
+    return sections
+
+
+async def backfill_missing_sub_outlines(task_id: str) -> None:
+    """把 sub_outline 还是空的段落，按标题从当前 writing_tasks.outline 文本里找回内容回填。
+
+    历史遗留坑：`sub_outline` 这一列在 reconcile_writing_sections 方案上线前从来没被
+    真正写入过（旧的 upsert_writing_sections 永远传空字符串），所以任何一个"还没做过
+    一次大纲保存"的任务，它名下所有段落的 sub_outline 全是空的——即便
+    writing_tasks.outline 里躺着一大段用户手写或 AI 生成的详细大纲。任何会触发
+    sync_task_derived_texts() 重新拼接 outline 的操作（保存目录、单段改名同步）如果不
+    先做这一步回填，会把这份历史内容当场清空成只剩标题——这是真实出现过的数据丢失
+    事故，务必在"改动 sections 的 heading 之前"调用（用旧标题去匹配当前 outline
+    文本），否则刚被改名的那一行会因为标题已经变了而找不到自己原来的内容。
+    幂等：只在 sub_outline 为空时才回填，不会覆盖已经有内容的行。
+    """
+    task = await database.fetch_one(
+        "SELECT outline FROM writing_tasks WHERE id = :tid", values={"tid": task_id}
+    )
+    if not task or not (task["outline"] or "").strip():
+        return
+    existing_map = _parse_outline_text_to_map(task["outline"])
+    if not existing_map:
+        return
+    rows = await database.fetch_all(
+        "SELECT id, heading FROM writing_sections "
+        "WHERE task_id = :tid AND (sub_outline IS NULL OR sub_outline = '')",
+        values={"tid": task_id},
+    )
+    for r in rows:
+        body = existing_map.get(r["heading"])
+        if body:
+            await database.execute(
+                "UPDATE writing_sections SET sub_outline = :so WHERE id = :sid",
+                values={"so": body, "sid": r["id"]},
+            )
+
+
+async def sync_task_derived_texts(task_id: str) -> tuple[str, str]:
+    """按 section_index 顺序把 writing_sections 重新拼成 outline/toc 文本写回 writing_tasks。
+
+    writing_sections 是唯一权威源，outline/toc 是它的派生视图——任何一次改变了
+    heading/sub_outline/顺序/归档状态的操作之后都要调它一次，这样读取任务详情
+    时可以直接读字段，不用每次现拼。
+    """
+    rows = await get_writing_sections(task_id)   # 已按 status != 'archived' 过滤 + ORDER BY section_index
+    outline_text = "\n\n".join(
+        (f"## {r['heading']}\n{(r['sub_outline'] or '').strip()}".rstrip()
+         if (r.get("sub_outline") or "").strip() else f"## {r['heading']}")
+        for r in rows
+    )
+    toc_text = "\n".join(f"## {r['heading']}" for r in rows)
+    await database.execute(
+        """UPDATE writing_tasks
+           SET outline = :outline, toc = :toc,
+               outline_updated_at = NOW(), toc_updated_at = NOW(), updated_at = NOW()
+           WHERE id = :tid""",
+        values={"outline": outline_text, "toc": toc_text, "tid": task_id},
+    )
+    return outline_text, toc_text
 
 
 async def update_writing_section(section_id: str, task_id: str, **kwargs) -> bool:
@@ -1435,6 +1641,24 @@ async def update_writing_section(section_id: str, task_id: str, **kwargs) -> boo
         values=values,
     )
     return row is not None
+
+
+async def touch_section_generated_at(section_id: str, task_id: str) -> None:
+    """把 last_generated_at 重新打成当前时间，不改任何其它字段。
+
+    专门给"编辑正文时顺带改了标题"这条路径收尾用：那条路径的顺序必须是先保存
+    content/heading（这一步已经把 last_generated_at 打成 NOW() 了），再调用
+    sync_task_derived_texts() 重新拼 outline/toc（那一步会把 outline_updated_at/
+    toc_updated_at 也打成 NOW()，但因为是两条先后执行的 SQL，第二个 NOW() 必然
+    比第一个晚）——不这样收尾的话，isSectionStale() 会把"大纲更新时间 > 本段
+    last_generated_at"判定为真，导致刚改完标题的这一段，立刻被自己这次编辑
+    标成"过期"，纯属这次编辑自己引发的、对自己的误报。
+    """
+    await database.execute(
+        "UPDATE writing_sections SET last_generated_at = NOW(), updated_at = NOW() "
+        "WHERE id = :sid AND task_id = :tid",
+        values={"sid": section_id, "tid": task_id},
+    )
 
 
 async def delete_writing_section(section_id: str, task_id: str) -> bool:

@@ -107,7 +107,7 @@ tsai/
 | `POST` | `/writing/tasks` | 新建写作任务（同时创建 is_writing_session Session） |
 | `GET` | `/writing/tasks` | 获取用户全部写作任务列表 |
 | `GET` | `/writing/tasks/{task_id}` | 获取单个写作任务详情 |
-| `PATCH` | `/writing/tasks/{task_id}` | 更新写作任务设置（title/word_count/style_req/content_req/outline/toc/reference_files，只发差异字段）。`toc` 变更时自动同步 `writing_sections`（按标题 upsert，均分字数目标） |
+| `PATCH` | `/writing/tasks/{task_id}` | 更新写作任务设置（title/word_count/style_req/content_req/outline/toc/reference_files，只发差异字段）。`outline`/`toc` 变更时走 `reconcile_writing_sections` 协调同步 `writing_sections`（`outline` 优先，见十一.4.1），可能返回 `{needs_confirm:true, reconcile_preview}` 而不落库，需带 `confirm_reconcile:true` 重新提交 |
 | `DELETE` | `/writing/tasks/{task_id}` | 删除写作任务 |
 | `GET` | `/writing/tasks/{task_id}/content` | 获取最新写作内容（+version 号） |
 | `POST` | `/writing/tasks/{task_id}/content` | 保存写作内容（版本化，保留最近 3 版） |
@@ -120,8 +120,9 @@ tsai/
 | `POST` | `/writing/tasks/{task_id}/generate_content` | SSE 流式生成/优化写作内容（含 RAG 参考资料检索）；大纲 ≥2 章节且总字数=0 或 ≥3000 时自动切换为**逐章节生成**（`use_sectional`），每章独立调用并携带前文尾部 1200 字作衔接提示 |
 | `POST` | `/writing/tasks/{task_id}/chat` | 写作 AI 对话（全文级）；AI 用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` 包裹修改后全文 |
 | `GET` | `/writing/tasks/{task_id}/sections` | 获取任务的全部分段（`writing_sections`，按 `section_index` 排序） |
-| `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status） |
-| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落结尾 800 字作衔接），完成后段落状态置为 `draft` |
+| `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status）。只传 `content` 且没显式传 `heading` 时，若正文首行是 `## 新标题`，自动同步为该段新标题并重算任务的 outline/toc 派生文本（响应带 `heading_synced`），见十一.4.1 |
+| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落的**完整**正文作衔接，而不是摘要——内容可能被人工编辑过，衔接要看真实内容），完成后段落状态置为 `draft`；若任务里还有别的段落已有内容，额外跑一次大纲一致性检查，需要调整时在流末尾追加一个 `type:"outline_review"` 的信号帧（非文本分片），见十一.4.2 |
+| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/apply_outline_review` | 应用一致性检查提出的大纲调整建议（`scope: "section"｜"overall"`），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/format` | 单段 Markdown 排版（同 Codex→Gemini 回退策略） |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/chat` | 单段 AI 对话，AI 用 `[SECTION_UPDATE_START]...[SECTION_UPDATE_END]` 包裹修改后该段内容 |
 | `GET` | `/writing/tasks/{task_id}/full_content` | 拼接所有 `draft`/`confirmed` 状态段落为完整正文（分段视图 → 全文视图），响应含 `skipped_headings`（未生成/非 draft-confirmed 的章节标题列表） |
@@ -291,9 +292,10 @@ title           TEXT DEFAULT '未命名写作'
 word_count      INTEGER DEFAULT 0         -- 0 = 不限
 style_req       TEXT DEFAULT ''           -- 风格要求（原始文字描述）
 content_req     TEXT DEFAULT ''           -- 内容要求
-outline         TEXT DEFAULT ''           -- 内容大纲（可手动修改或 AI 生成）
+outline         TEXT DEFAULT ''           -- 内容大纲；writing_sections 是权威源后，这是从各段
+                                           -- heading+sub_outline 派生拼接、写回的产物（见下）
 outline_updated_at TIMESTAMPTZ            -- 大纲最近更新时间（驱动前端"过期"标记）
-toc             TEXT DEFAULT ''           -- 写作目录（TOC，简化版大纲，驱动 writing_sections 生成）
+toc             TEXT DEFAULT ''           -- 写作目录；同上，派生自各段 heading，不再是独立权威数据
 toc_updated_at  TIMESTAMPTZ               -- TOC 最近更新时间
 style_skills    TEXT DEFAULT ''           -- AI 蒸馏出的结构化「风格技能手册」，生成时优先于 style_req
 style_skills_updated_at TIMESTAMPTZ
@@ -334,7 +336,7 @@ updated_at        TIMESTAMPTZ DEFAULT NOW()
 
 索引：`idx_writing_sections_task_id` on `(task_id, section_index)`
 
-保存 TOC（`PATCH /writing/tasks/{id}` 传 `toc`）时，`writing.py:_parse_toc` 解析出标题列表，`upsert_writing_sections` 按**标题做 diff 合并**同步该任务的 `writing_sections`：标题能在旧表中匹配到的行只刷新 `section_index`（未生成过内容的还会刷新 `word_count_target`），`content`/`status` 保持不变；新 TOC 里被移除的标题**归档**（`status='archived'`）而非删除，避免生成内容被静默清空；归档行对应的标题若后续重新出现在 TOC 里则自动复活（`status` 由 `archived` 回退为 `pending`）。`get_writing_sections()` 统一过滤掉 `archived` 行，所以段落列表、单段生成的衔接上下文、字数目标计算都不会看到已归档的段落。单段生成携带上一个已生成段落结尾 800 字做衔接提示；`GET .../full_content` 拼接所有 `draft`/`confirmed` 段为完整正文（未生成的段落标题收集进 `skipped_headings` 一并返回），供"分段视图 ↔ 全文视图"切换。
+**`writing_sections` 是唯一权威源，`writing_tasks.outline`/`toc` 是它的派生视图**——两个文本字段物理存在、可直接读取展示，但内容永远是 `sync_task_derived_texts()`（`backend/db.py`）按 `section_index` 顺序把各段重新拼接、写回的产物（`toc` 固定 `## {heading}` 每行一条；`outline` 固定 `## {heading}\n{sub_outline}`，段落间空行分隔），不是各自独立维护的自由文本。任何一次改变了 heading/sub_outline/顺序/归档状态的操作之后都会调它一次。详见十一.4.1「目录/大纲/段落三方同步」。`get_writing_sections()` 统一过滤掉 `archived` 行，所以段落列表、单段生成的衔接上下文、字数目标计算都不会看到已归档的段落。单段生成携带上一个已生成段落的**完整**正文做衔接提示（不再截断摘要，见十一.4.2）；`GET .../full_content` 拼接所有 `draft`/`confirmed` 段为完整正文（未生成的段落标题收集进 `skipped_headings` 一并返回），供"分段视图 ↔ 全文视图"切换。
 
 ### `writing_evaluations`（多 Agent 质量评估，写作模块）
 
@@ -762,8 +764,8 @@ body (flex row, ≥993px)
    ├─ 已有详细大纲 → 从大纲提炼 5-10 条 "## 标题"
    └─ 无大纲 → 直接从任务标题/字数/内容要求生成
 2. 保存 TOC（PATCH tasks/{id} 传 toc）
-   └─ writing.py:_parse_toc 解析标题 → upsert_writing_sections 按标题 diff 合并同步 writing_sections
-      （同名标题保留 content/status，只重排 section_index；未生成过的刷新 word_count_target；
+   └─ writing.py:_parse_toc 解析标题 → reconcile_writing_sections 两阶段对齐同步 writing_sections
+      （精确文本匹配 + 剩余项按相似度配对识别"改名"，见十一.4.1；顺序调整/新增/删除都处理，
        消失的标题归档而非删除，防止已生成内容被清空；标题复现则复活归档行）
 3.（可选）generate_outline_from_toc：由 TOC 反推逐章详细大纲，回填 outline 字段
 4. 每个 section 卡片独立操作：
@@ -777,11 +779,48 @@ body (flex row, ≥993px)
    │  textarea——`#sections-container` 收窄为 `min(820px, 50%-10px)`（`.split-active`），浮窗按原卡片
    │  `getBoundingClientRect()` 动态定位在其右侧，两者作为整体在 `#content-area` 内居中
    │  （`positionSectionEditPortal()`）；textarea 内容随输入实时同步回 `draftContent`，只有点击
-   │  "替换原文"才 PATCH 持久化，"取消替换"则整个丢弃
+   │  "替换原文"才 PATCH 持久化（正文首行若是 `## 新标题` 会自动同步为本段标题，见十一.4.1），
+   │  "取消替换"则整个丢弃
    └─ 手动切换 status：pending → draft → confirmed
 5. full_content：拼接所有 draft/confirmed 段落 → 完整正文（跳过的标题列入 skipped_headings）；
    前端"合并为全文"点击时若已有全文内容会先 `confirm()` 提示"将完全替换、不可撤销"，确认后保存并自动触发排版+质量评估
 ```
+
+#### 十一.4.1 目录 / 大纲 / 段落三方同步
+
+**权威源是 `writing_sections`，`outline`/`toc` 是派生视图，不是三份各自独立的数据**。段落标题、目录条目、大纲分段互为同一份数据的三种呈现：改段落正文首行标题 → 同步目录/大纲；改目录（文字/顺序/增删）→ 同步段落标题/顺序/新建/归档，且大纲对应行也跟着更新；改大纲（保存时按 `## ` 切分成逐段）→ 段落的 `heading`/`sub_outline` 同步更新，目录也跟着重排。三个入口最终都落到同一套函数：
+
+- `backend/db.py:_align_headings(pool, new_headings)`：纯函数，两阶段标题对齐算法。
+  - **阶段一·精确文本匹配（与位置无关，含 archived 行）**：FIFO 队列按标题文本分桶（活跃行优先入队，archived 行排后面，同名时优先复活/复用"还活着"的那行），按新标题顺序逐个消费——这一步就是"任意重排序/新增/删除都不误伤不变标题"的核心能力。**不能直接用位置对齐的 LCS**：`[A,B,C]` 纯重排成 `[C,A,B]`，标准 LCS（下标必须单调递增）只能找到 `[A,B]`，会把纯重排误判成删除+新增。
+  - **阶段二·剩余项按原相对顺序配对为"改名"**：阶段一消费剩下的旧标题（仅限未 archived）和新标题，按各自相对顺序一一配对，`difflib.SequenceMatcher(...).ratio() >= 0.3` 判定为改名（heading 更新，content/status 原样保留），阈值以下当成两个独立事件（删除+新增）——加这道相似度闸门是为了防止把内容完全无关的新标题错配到旧段落上、静默"继承"旧段落已经写好的正文和 confirmed 状态，比误判成删除更隐蔽。
+- `backend/db.py:reconcile_writing_sections(task_id, new_headings, new_sub_outlines, confirm=False)`：目录/大纲保存的统一协调入口（取代旧的 `upsert_writing_sections`）。`new_sub_outlines=None` 表示只保存目录（不动 `sub_outline`）；传入列表表示保存大纲，连细纲一起同步。先只读比对：`deleted` 集合里 `status != 'pending'` 或 `content` 非空的行数（`risky_archive_count`）**超过 3** 时，若调用方未带 `confirm=True`，直接返回 `{needs_confirm:true, ...预览}` 不写库；否则真正执行 UPDATE/INSERT/归档，调用 `sync_task_derived_texts` 写回派生文本。改名/纯新增不计入风险计数——改名内容会保留、新增不会丢东西，只有真会让已有内容"消失"的删除才拦。和库内现状完全等价（无改名/归档/新建、顺序不变、sub_outline 不变）时直接跳过写库，避免误刷 `outline_updated_at`/`toc_updated_at` 触发所有段落的"过期"徽章。
+- `backend/db.py:sync_task_derived_texts(task_id)`：按 `section_index` 顺序读 `get_writing_sections`（已过滤 archived），拼出规范化 `toc`（`## {heading}` 每行一条）和 `outline`（`## {heading}\n{sub_outline}`，段落间空行），写回 `writing_tasks` 并刷新两个 `_updated_at` 时间戳。任何一次改变 heading/sub_outline/顺序/归档状态的操作后都要调它一次。
+  - **踩过的坑（真实事故）**：`sub_outline` 这一列在本方案上线前从来没被写入过（旧的 `upsert_writing_sections` 永远传空字符串），所以任何一个"还没做过一次大纲保存"的老任务，它名下所有段落的 `sub_outline` 全是空的——即便 `writing_tasks.outline` 里躺着一大段用户手写/AI 生成的详细大纲。`sync_task_derived_texts` 一旦在这种任务上被调用（哪怕只是保存目录、或单段改名），会把 `outline` 现场重建成"只剩标题、正文全部消失"。修复：`backend/db.py:backfill_missing_sub_outlines(task_id)` 在任何会触发 `sync_task_derived_texts` 的操作之前，先按标题把 `writing_tasks.outline` 里躺着的历史内容回填进对应段落的空 `sub_outline`（幂等，只填空的，不覆盖已有内容）——`reconcile_writing_sections` 一开始就调用它；`patch_section` 的改名分支必须在**改 heading 之前**调用（回填是按当前/旧标题去匹配现有 outline 文本，heading 一旦先改掉，那一行就再也找不到自己原来的内容了）。
+- `writing.py:patch_task`：`outline`/`toc` 都出现在同一次 PATCH（比如"保存设置"一次性提交了都改过的两者）时，**以 outline 为准**（信息量更全，同时带 sub_outline），toc 原始文本不再单独处理。若解析不出任何 `## ` 标题（用户还在写没分章节的草稿），走"引导阶段"例外：原样存文本，不触发 reconcile，避免把随手写的笔记误判成"清空所有章节"。
+- `writing.py:patch_section`：只传 `content` 且未显式传 `heading` 时，正则匹配正文首行 `^##\s+(.+?)\s*$`，若解析出的标题和当前 `heading` 不同就一并更新（响应带 `heading_synced`），并调用一次 `sync_task_derived_texts`——单段改名是无歧义的 1:1 关系，不跑对齐算法、不触发确认阈值。
+  - **踩过的坑（改名把自己标成"过期"）**：`update_writing_section` 保存 content/heading 时会把这一段的 `last_generated_at` 打成 `NOW()`；紧接着 `sync_task_derived_texts` 又把 `outline_updated_at`/`toc_updated_at` 打成另一个 `NOW()`——两条先后执行的 SQL，第二个时间戳必然比第一个晚。前端 `isSectionStale()`（下方"过期"徽章）判断依据正是"大纲更新时间 > 本段最后生成时间"，于是刚改完标题的这一段会被自己这次编辑误标成"过期"。修复：`backend/db.py:touch_section_generated_at(section_id, task_id)` 在 `sync_task_derived_texts` 之后再把这一段的 `last_generated_at` 重新打一次 `NOW()`，确保它不早于刚刚一起更新的 outline/toc 时间戳。
+- 前端 `templates/writing.html`：`#modal-reconcile-confirm` 弹窗（仿 `#modal-del-writing` 样式）展示"识别为改名/将被归档/新增空段落"三组明细；`patchTaskWithReconcile()` 统一处理 PATCH 响应里的 `needs_confirm`（暂存 payload 到 `pendingReconcilePatch`、开弹窗），`btn-confirm-reconcile` 带上 `confirm_reconcile:true` 重新提交；`finishSettingsPatch()` 是 `btn-save-toc`/`btn-save-settings`/确认按钮共用的收尾（把 reconcile 返回的规范化 `outline`/`toc` 一起写回 `localSettings`/`savedSettings`——哪怕只编辑了其中一个，另一个也可能因顺序/改名同步而变化，必须两个都刷新，否则编辑框会显示过期内容、脏检查会误判）。
+
+#### 十一.4.2 段落生成时的大纲漂移检测
+
+**内容以人工编辑为准，大纲是从属描述**：`templates/writing.html` 段落卡片只在 `!hasContent` 时才显示 `sub_outline` 片段——已经有内容（生成过或被人工编辑替换过）的段落，实际内容可能早就偏离了当初的大纲，继续展示这份大纲容易误导，且不强制要求两者保持一致。
+
+**生成时内容优先于大纲**：`generate_section_content`（`writing.py`）衔接上下文从"上一段结尾 800 字"改成上一段**完整**正文（`prev_full`，不截断），prompt 里明确"如果实际内容与大纲描述有出入，以实际内容为准"——大纲只在当前要生成的这一段本身没有内容时才是唯一依据（`sec_outline`），对已经写出来的相邻段落，真实内容才是权威衔接依据。
+
+**生成完成后的一次性一致性检查**（`_check_outline_drift`，紧邻 `generate_section_content` 之前）：仅当任务里还有别的段落已经有内容时才触发（第一段生成、没有可比对对象时跳过，省一次调用）。额外发起一次非流式 Gemini 调用：给模型看大纲全文 + 每个其它段落的当前状态（有内容的段落给**真实内容**、没内容的段落给它的 `sub_outline`）+ 刚生成的这段内容，要求按严格标签格式（沿用 `_READABILITY_PROMPT_TMPL` 一类的纯文本标签 + 正则提取的项目既有约定，不用 `response_mime_type=json`）判断大纲是否需要调整：
+```
+需要调整：是/否
+本段大纲建议：<...或"无">
+整体大纲需要调整：是/否
+整体大纲建议：<完整新大纲全文，或"无">
+其它段落大纲回填：
+- 标题：<原文一字不差> | 新大纲：<...>
+```
+prompt 明确要求"优先只给本段建议，非必要不提整体建议"、"回填标题必须逐字复制原文，不得意译"。解析失败/判定"否"/调用异常统统返回 `None`——这一步纯属锦上添花，绝不影响本次生成已经成功保存的正文，外层用 `try/except` 包一层。
+
+**信号帧不走文本分片通道**：判定需要调整时，在 SSE 流末尾、`[DONE]` 之前，多 yield 一帧 `data: {"type":"outline_review", ...}\n\n`——注意不经过 `_sse_chunk()`（那个是把字符串套一层 JSON 编码，用于正文分片），这里直接 `json.dumps` 一个**对象**。前端 `generateSection()` 手写的 SSE 读取循环里，`decodeSseData(raw)` 解出来是字符串就走原来的正文累加逻辑，是对象且 `type==='outline_review'` 就单独摘出来、不计入正文字数——两种帧共用同一条 SSE 通道，靠 JS 的 `typeof` 区分，不用引入具名的 SSE `event:` 字段（项目里所有手写读取循环都不解析它）。这个"用 `type` 字段区分帧类型"的约定和 `evaluate_content`/`gen_eval()` 的 `{'type':'stage',...}`/`{'type':'complete',...}` 是同一套。
+
+**应用调整**（`POST .../sections/{section_id}/apply_outline_review`）：`retrofits`（顺带回填的其它段落）无论选哪个 scope 都会先应用，只改那些段落的 `sub_outline`、绝不碰它们的 `content`/`status`。`scope=section` 只更新当前段自己的 `sub_outline` 再调 `sync_task_derived_texts`；`scope=overall` 把模型给的完整新大纲丢给 `_parse_outline_sections` 解析后直接复用整套 `reconcile_writing_sections` 管线（十一.4.1）——不额外跳过它的 `>3` 高风险确认阈值，一次 AI 提议的整体重写不该比人工编辑更值得信任，若触发确认，前端复用同一个 `#modal-reconcile-confirm` 弹窗（`pendingOutlineReviewRetry` 和 `pendingReconcilePatch` 二选一，谁非空就是这次弹窗该重放谁）。整体大纲解析不出任何 `## ` 标题（模型输出格式跑偏）时直接 400，不调用 reconcile——避免把"清空所有段落"这种危险操作当成正常输入执行。
 
 **AI 面板与"放大段落"联动**：分段视图下，AI 对话面板/质量评估面板作用于当前放大的段落（`expandedSectionId`），而非全文；没有段落处于放大状态时，对话面板发送前提示、评估面板直接跳过不请求。切回全文视图后两者自动恢复为全文目标（判断逻辑在调用时读取 `viewMode`，无需额外状态同步）。"更新内容"按钮（全文一次性重新生成）在分段视图下点击会提示先"合并为全文"，而不是静默按全文大纲重新生成、丢弃分段草稿。
 
@@ -1693,7 +1732,10 @@ DB 函数（`backend/db.py`，全部照 `drawing_*` / `writing_contents` 抄）�
 - **Tab A「地图效果」**：图层开关（卫星底图 / **行政区划**（主开关 `#tg-admin` + `#admin-sub` 里的边界 / 地名 / 道路 3 个子开关，`ensureAdmin()` / `_adminVis()` / `applyAdminVis()`）/ 海拔设色 / 水系 / 拆出+区域）、卫星层 6 参、山影 5 参 + 地形夸张、水系颜色、CSS 古卷滤镜、背景色。开关一律 `<label class="map-switch"><input type=checkbox></label>`（Materialize 会把裸 checkbox 设成 `opacity:0;pointer-events:none`，故自绘 `::before` 轨 + `::after` 钮 + `:has(input:checked)` 变色）。
 - **Tab B「点 / 线 / 标注」**：工具条只有 **选择 / 加点 / 连线**（无「删除」——删除走列表行里的真 `<button class="annot-del-btn">`）+ 可折叠属性编辑区 + 列表。`renderList()` 按当前工具过滤：**加点** Tab 只列点位、**连线** Tab 只列连线，**选择** Tab（两者都不是）两种都列；地图上的既有点线渲染（`renderPoints()`/`renderLinks()`）不受此过滤影响，一直全量显示。
   - **加点 3 种方式**（`#add-point-panel`，仅「加点」模式显示）：① 地图点击选点 ② 输入经纬度（`#add-lat` / `#add-lng`，校验 ±90 / ±180）③ 地名搜索（`#geocode-q` → `authFetch("/map/geocode?q=")` → `#geocode-results` 候选列表，多结果让用户点选）。三条路径最终都走 `addPointAt(lng,lat,name)`。输入框需带 `browser-default` 类（否则 Materialize `input[type=number/search]` 强制 `height:3rem`）+ 一堆 `data-*-ignore` 关掉 1Password 弹窗。
-  - 点位：HTML `maplibregl.Marker`（`anchor:"center"`）+ CSS 图形（方 / 圆 / 菱 / 关门 / 星）+ 可选**名称徽标**（`.map-pt-badge`，`position:absolute` 挂在图形下方，尺寸变化不挪锚点）。仅**选择**模式可拖拽（`draggable: annotMode==="select"`），`dragend` 回写 `pt.lng/lat` 并重画连线 / 列表 / 属性。
+  - 点位：HTML `maplibregl.Marker`（`anchor:"center"`）+ CSS 图形（方 / 圆 / 菱 / 关门 / 星）+ 可选**名称徽标**（`.map-pt-badge`，`position:absolute` 挂在图形外面，尺寸变化不挪锚点）。仅**选择**模式可拖拽（`draggable: annotMode==="select"`），`dragend` 回写 `pt.lng/lat` 并重画连线 / 列表 / 属性。
+    - **名称标注方位（8 方向）+ 间距**：`pt.label.pos`（`ensureLabel()` 归一化，缺省/脏值兜底 `"bottom"`）∈ 上/下/左/右 + 四个对角，`makePointEl()` 给徽章加 `.pos-<值>` 类，落地规则全在 CSS（`map.css`）：四正方向贴边居中（如 `.pos-bottom { top:calc(100% + var(--pos-gap,4px)); left:50%; transform:translateX(-50%) }`），四对角贴角外扩、两个方向都留同一个间距不居中（如 `.pos-top-left { bottom:calc(100% + var(--pos-gap,4px)); right:calc(100% + var(--pos-gap,4px)) }`）。这些百分比坐标都相对 `.map-pt`（只包住 shape 本身的盒子）算，所以方位规则和点位 `size` 无关。
+      - **间距可调**：那个写死的 `4px` 现在是 CSS 自定义属性 `--pos-gap` 的兜底值，真正的值来自 `pt.label.margin`（`ensureLabel()` 缺省 `LABEL_MARGIN_DEFAULT = 4`）——`makePointEl()` 用 `badge.style.setProperty("--pos-gap", margin + "px")` 挂到徽章自己的 inline style 上，所以每个点位可以各自设置不同的间距，八个方位共用同一个间距值（不是每个方位单独一个值）。属性面板对应一个「标注间距（像素）」的 `num` 输入（0–60）。
+      - 属性面板用 `posPicker()` 画一个 3x3 方位选择器（中间格空着，`LABEL_POS_GRID` 定义八个方向的箭头符号）。**`labelPos` / `labelMargin` 故意不进组公共属性**（不在 `GROUP_PROP_DEFAULTS`/`GROUP_POINT_APPLY` 里，`groupDivergence()` 也不比对）——方位和间距是每个点位自己的摆放微调，不是「一批点该长一个样」的样式，同一组里不同点为了互相让位置，摆放方向往往正好相反，所以只在点位自己的属性面板（`pointEditor`）里调，组统一修改 / 组属性面板都碰不到这两项。
   - **`.map-pt { position: absolute }` 是硬约束**：`map.css` 在 `maplibre-gl.css` 之后加载，若为 `relative` 会盖掉 `.maplibregl-marker{position:absolute}`，marker 落回文档流、按各自 badge 尺寸层层错位（曾导致最大 badge 的点缩放时漂移）。
   - 连线：`renderLinks()` 生成 LineString 喂 `annot-link-solid` / `annot-link-dash` 两个 line 图层（`line-dasharray` 不支持数据驱动，按 `["==",["get","dash"],true]` 拆两层，虚线 `[2,2]`）；**有向箭头** = `annot-arrowheads` GeoJSON（LineString 末点 + `bearing` + `icon` + `sizeMul`）喂 `annot-link-arrow` symbol 图层，`icon-image:["get","icon"]` + `icon-rotate` + `icon-color`（不再用字形 `➤`，Noto Sans 里没有）。
     - **箭头样式 + 大小**：`lk.arrowStyle` ∈ `ARROW_STYLES`（`triangle` 宽三角缺口 / `narrow` 窄三角 / `chevron` 描边 ">"，默认 `triangle`）、`lk.arrowSize` 数值倍率（默认 1，0.5~3 可调）。三种样式各自是 `makeArrowImage(style, 24)` 画的朝北 canvas 图形，`map.on("load")` 时循环注册成 `annot-arrow-triangle`/`annot-arrow-narrow`/`annot-arrow-chevron` 三张 `addImage(…, {sdf:true})` 图标；图层的 `icon-size` 用每条连线自己的 `sizeMul` 倍率乘上原有的缩放插值曲线。只在「有向（箭头）」勾选时，属性面板才显示「箭头样式」「箭头大小」两个控件。
@@ -1710,6 +1752,10 @@ DB 函数（`backend/db.py`，全部照 `drawing_*` / `writing_contents` 抄）�
     - **新建组：先选子条目、不允许空组**：点「＋ 新建组」只是把 `pendingGroupPick` 从 `null` 变成 `[]`（`startCreateGroup`），并不立即建组；这之后 `renderList()` 在每个点/线行前面插入勾选框（`pickCheckbox`，复用 `.map-switch`），并在列表顶部露出 `#annot-group-pick-bar`（已选 N 个 / 确定建组 / 取消）。**这个流程里已有的组和它们的成员完全不渲染**（`renderList()` 遇到 `pendingGroupPick` truthy 时直接跳过组条目）——候选列表只剩未分组的点/线，不会被别的组的成员撑长。「确定建组」（`confirmCreateGroup`）在 `pendingGroupPick` 为空时直接 toast 拒绝；非空时才真正 `push` 一个新组、把组头插到这批被选条目里原本顶层位置最靠前的那个位置、再逐个 `moveToGroup` 挪进去。picking 状态跨工具 Tab 保留（不会因为切到「连线」去挑几条线又跳回「加点」而被打断），且此时列表行的拖拽和删除按钮都临时隐藏，避免和勾选手势冲突。
     - **组的属性面板不变**：`groupEditor()` 依然是打开一个组时属性区显示的内容——组名、成员勾选列表（列表里的复选框和上面的建组勾选框是两套独立 UI，但都收敛到同一个 `moveToGroup`）、点位公共属性（颜色 / 名称文字色 / 信息框底色+边线色 / 名称字号 / 前缀底色+文字色+字号）、连线公共属性（颜色 / 线宽 / 线形 / **箭头样式 / 箭头大小**）、「应用到全部成员」（`applyAllGroupProps`，成员被单独改过导致和组设定不一致时 `groupDivergence()` 会提示）、「解散该组」。`selectedId` 三态：点 id（`p_`）/ 线 id（`l_`）/ 组 id（`g_`），前缀不冲突，`renderEditor()` 据此分发到 `pointEditor`/`linkEditor`/`groupEditor`。
     - **踩过的坑（按钮样式漏挂）**：「应用到全部成员」按钮最初复用了 `.annot-add-btn` 类，但那份视觉样式在 CSS 里写成 `#add-point-panel .annot-add-btn`——限定了父级选择器，组面板不在 `#add-point-panel` 下，class 挂了等于没挂，按钮退化成浏览器默认丑样式。改法：`.grp-apply-btn` 自己带全套颜色 / 圆角 / 字号（跟「按坐标添加」「＋ 新建组」视觉一致），不再依赖那条限定了父级的规则。
+- **下载图片**（工具条「下载图片」，`downloadMapImage()`）：把当前地图（底图/矢量/地形，MapLibre 渲染在 WebGL canvas 里）+ 点位/名称标注（DOM 覆盖层，`maplibregl.Marker`）合成一张 PNG 下载。
+  - **两层内容分开处理**：连线 / 箭头 / 连线名称标注早就是 MapLibre 样式图层，随底图一起在 canvas 里，`ctx.drawImage(map.getCanvas(),0,0)` 直接就有；点位形状 + 名称标注（含信息框、前缀、八方位摆放、间距，见上文）是 DOM，不在 canvas 里。**不重新写一套 canvas 绘图逻辑去手画形状/flex 布局**（容易和 CSS 实际效果对不上、CSS 一改这里要跟着改），而是把当前这批 `.maplibregl-marker`（`collectMarkerHtml()`，跳过 `.link-handle` 拖拽手柄，清掉 `.sel`/`.in-group` 选中态类）原样序列化进一个 SVG `<foreignObject>`、连同 `map.css` 全文一起塞进一个 `data:image/svg+xml` 的 `Image`，用浏览器真正的排版引擎光栅化，再 `drawImage` 叠到底图上——天然和屏幕一致，不用维护第二套样式逻辑。`data:` URI 图片不会给 canvas 加跨域污点，之后 `toBlob()` 正常可用。
+  - **canvas 读取前提**：`_createMap()` 建图时要开 `preserveDrawingBuffer: true`，否则 WebGL 后台缓冲区可能已被清空，`getCanvas()` 读出来是黑图/空图。
+  - **「做旧」CSS 滤镜要手动补回**：`applyCssOverlays()` 的 sepia/饱和度/对比度/亮度/色相旋转是挂在 `.maplibregl-canvas` 元素自己的 CSS `filter` 上、`#map-warm-tint`（`mix-blend-mode:soft-light` 暖色调）和 `#map-main::after`（`radial-gradient` 暗角，`--vignette` 驱动）都是页面上单独的 DOM/伪元素叠层——这三样都不在 `getCanvas()` 的像素数据里，直接 `drawImage` 会丢。`downloadMapImage()` 用 Canvas 2D 的等价能力补回：画底图时用同语法的 `ctx.filter` 顶替 CSS filter；暖色调用 `ctx.globalCompositeOperation="soft-light"` + `fillRect`；暗角用 `ctx.scale` 把坐标系压成画布长宽比、`createRadialGradient` 画一个贴合椭圆的径向渐变。**层序对应页面真实的 z-index**（`#map-warm-tint`/`::after` 的 z-index 比地图容器高，会连点位一起罩住）：底图 → 点位标注 → 暖色调 → 暗角，不是先叠色再画点位。
 - **自动保存**：`map.js:scheduleSave()` 防抖 800ms → `PATCH /map/documents/{id}`；地图 `moveend` 防抖回写 `style.camera` 并触发保存。
 - **地形网格（`setTerrain` 3D mesh）只在地球视图或 `pitch > 4` 时开**（`applyTerrain()`）；平视地图只用 hillshade / color-relief 图层，避免 marker 贴着地形起伏漂移。
 - **版本历史（做法2）**：`map_documents.preset` 实时自动保存；`map_preset_versions` 只在检查点写快照——①**首次编辑前**把「打开时的 preset」存 `open-diff` 版 ②每 120s 若 preset 变化存 `checkpoint` 版 ③工具条「存快照」存 `manual` 版。变更检测用 `snapshotKey(p)`——序列化前 `delete c.style.camera`，所以**缩放 / 平移 / 俯仰 / 旋转不算「有变化」**（相机仍实时写进 `preset` 和库，只是不触发新快照）。「存快照」按钮会先 `syncCameraNow()` 把当前视角拉进 `preset` 再 POST，故手动快照能存下当前视角。留 3 版；「历史」弹窗可回滚（回滚后整页 reload）。
