@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 from google import genai
 from google.genai import types
 from .db import database
@@ -186,28 +187,45 @@ async def get_embedding(client, text: str):
     return resp.embeddings[0].values
 
 
-# 顺序批量获取文本嵌入，遇到 429 限流时指数退避重试
-async def get_embeddings_batch(client, texts: list, batch_size: int = 50, max_retries: int = 6) -> list:
+# 顺序批量获取文本嵌入，遇到 429 限流或网络层瞬断（服务器断连/超时等 httpx.TransportError）时指数退避重试。
+# 大文档往往要跑几百个顺序批次，长链路里偶发一次网络抖动的概率不低——之前只重试 429，
+# 一次瞬时的 "Server disconnected without sending a response." 就会直接中断整个文件的处理。
+async def get_embeddings_batch(client, texts: list, batch_size: int = 50, max_retries: int = 6,
+                                batch_timeout: float = 90.0) -> list:
     batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
     all_embeddings = []
 
     for idx, batch in enumerate(batches):
         for attempt in range(max_retries):
             try:
-                resp = await asyncio.to_thread(
-                    client.models.embed_content,
-                    model=settings.embedding_model,
-                    contents=batch,
-                    config=_embed_config,
+                # genai.Client 没配 HTTP 超时，单次请求网络层挂起时 to_thread 会永久阻塞
+                # （既不报错也不重试）；wait_for 兜底把"挂起"转成可捕获、可重试的 TimeoutError。
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.embed_content,
+                        model=settings.embedding_model,
+                        contents=batch,
+                        config=_embed_config,
+                    ),
+                    timeout=batch_timeout,
                 )
                 all_embeddings.extend(e.values for e in resp.embeddings)
                 break
             except Exception as e:
-                if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
+                is_rate_limit = '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e)
+                is_transient_network = isinstance(e, (httpx.TransportError, asyncio.TimeoutError))
+                if is_rate_limit:
                     wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, ...
                     logger.warning(
                         "Embedding batch %d/%d 触发限流，%ds 后重试 (第 %d 次)",
                         idx + 1, len(batches), wait, attempt + 1
+                    )
+                    await asyncio.sleep(wait)
+                elif is_transient_network:
+                    wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, ...
+                    logger.warning(
+                        "Embedding batch %d/%d 网络层瞬断（%s: %s），%ds 后重试 (第 %d 次)",
+                        idx + 1, len(batches), type(e).__name__, e, wait, attempt + 1
                     )
                     await asyncio.sleep(wait)
                 else:

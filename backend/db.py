@@ -528,8 +528,32 @@ async def update_file_status(session_id: str, filename: str, status: str,
     if error is not None:
         parts.append("error_msg = :error")
         values["error"] = error
+    elif status == 'done':
+        # 成功完成时清掉上一次失败残留的 error_msg，避免 done 状态还挂着旧报错误导用户
+        parts.append("error_msg = NULL")
     query = f"UPDATE upload_files SET {', '.join(parts)} WHERE session_id = :session_id AND filename = :filename"
     await database.execute(query, values=values)
+
+
+# 启动时把上一次进程遗留的卡死文件标记为 failed（而不是让前端一直显示"解析中"）。
+# process_file_and_insert 跑在 FastAPI BackgroundTasks 里，和处理它的 worker 进程绑定；
+# 只要这个 worker 在处理途中被重启/杀掉（部署、OOM 等），DB 行会永远停在 processing，
+# 且没有任何代码还在运行、能够替它写回失败状态——只能靠新进程启动时做一次性扫描补上。
+# 用 stale_minutes 兜底（而不是无条件把所有 processing 都标失败）是因为多 worker 场景下，
+# 滚动重启时其它 worker 可能正在合法地处理另一个文件，不能一刀切。
+async def fail_stale_processing_files(stale_minutes: int = 30) -> int:
+    rows = await database.fetch_all(
+        """
+        UPDATE upload_files
+        SET status = 'failed',
+            error_msg = '处理中断（服务重启或长时间无响应），请点击"重新处理"重试'
+        WHERE status = 'processing'
+          AND created_at < NOW() - make_interval(mins => :stale_minutes)
+        RETURNING filename
+        """,
+        values={"stale_minutes": stale_minutes},
+    )
+    return len(rows)
 
 
 # 查询文件处理状态列表

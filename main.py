@@ -63,6 +63,10 @@ async def startup():
     await init_map_tables()
     async with database._backend._pool.acquire() as conn:
         await register_vector(conn)
+    from backend.db import fail_stale_processing_files
+    n_stale = await fail_stale_processing_files()
+    if n_stale:
+        logger.info("启动时把 %d 个卡死在「解析中」超过 30 分钟的文件标记为 failed", n_stale)
 
 
 @app.on_event("shutdown")

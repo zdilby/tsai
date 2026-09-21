@@ -1,7 +1,7 @@
 # TSAI 项目架构文档
 
 > 本文档由 Claude Code 自动生成并维护，随代码变动同步更新。
-> 最后更新：2026-08-21
+> 最后更新：2026-09-21
 
 ---
 
@@ -531,10 +531,17 @@ updated_at      TIMESTAMP DEFAULT NOW()
    └── TXT/DOCX/DOC: 直接读取
 5. 文本分块（按 ## 标题或段落，最大 800 字/块）
 6. 为每块添加上下文头："[来源：xxx.pdf。开头：...。位置：第N段/共M段]"
-7. 批量 Embedding（每批 50 条，遇 429 指数退避重试：30s→60s→120s→...）
+7. 批量 Embedding（`backend/rag.py:get_embeddings_batch`，每批 50 条顺序调用）：
+   ├── 429/RESOURCE_EXHAUSTED（限流）→ 指数退避重试：30s→60s→120s→...
+   ├── httpx.TransportError / asyncio.TimeoutError（网络层瞬断或单批调用超过 90s 无响应）
+   │    → 指数退避重试：5s→10s→20s→...（genai.Client 未配置 HTTP 超时，这层 wait_for
+   │      超时兜底是唯一防线，否则单次挂起会让整批处理无限期卡在 processing）
+   └── 重试 6 次仍失败 → raise，外层 except 写回 upload_files.status=failed + error_msg
 8. 批量插入 knowledge_base（含 pgvector 向量）
 9. 更新 upload_files.status → done
 ```
+
+> **卡死兜底**：`process_file_and_insert` 跑在 FastAPI `BackgroundTasks` 里，和处理它的 worker 进程绑定——若 worker 在处理途中被重启/杀掉（部署、OOM 等），后台任务直接消失，DB 行永远停在 `processing`，没有任何代码能替它写回失败状态。`backend/db.py:fail_stale_processing_files()` 在 `main.py` 的 `startup` 事件里跑一次，把上一个进程遗留的、超过 30 分钟仍是 `processing` 的行统一标记为 `failed`（带用户可读的 `error_msg`），前端轮询到 `failed` 会展示"❌ 失败，点击重试"，不会再无限期停在"解析中"。阈值用 30 分钟而非无条件清空，是为了不误伤多 worker 滚动重启时其它 worker 正在合法处理的文件。
 
 ### 5.3 认证流程
 
@@ -627,6 +634,7 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `generate_invite.py` | 生成邀请码 |
 | `clear_failed_uploads.py` | 清理失败的上传记录 |
 | `clear_knowledge_base.py` | 清空指定 Session 的 RAG 向量 |
+| `check_file_status.py` | 按文件名模糊查询 `upload_files` 完整状态（`show_file_errors.py` 只看 failed/pending，这个能看 processing/done 全部状态，排查卡死问题用） |
 | `show_file_errors.py` | 查看文件处理错误 |
 | `reset_stuck_processing.py` | 重置卡住的处理任务 |
 | `migrate.py` | 执行数据库迁移 |
