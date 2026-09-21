@@ -190,8 +190,23 @@
             padding: 8px 16px;
             color: #504e49;
         }
-        #content-preview strong { color: #141413; }
+        #content-preview strong, #content-preview b { color: #141413; font-weight: bold !important; }
+        #content-preview em, #content-preview i { font-style: italic; }
         #content-preview hr { border: none; border-top: 1px solid #e8e6dc; margin: 1.5em 0; }
+        /* Materialize 全局把 ul:not(.browser-default) 和其下的 li 都重置成
+           list-style-type:none、padding-left:0（给它自己的 collection/nav 组件用的），
+           marked.js 输出的 <ul>/<ol> 没有 browser-default class，会被一起重置掉——
+           这里用 !important 覆盖回来，和下面 .message strong 那条是同一类修复。 */
+        #content-preview ul, #content-preview ol {
+            margin: 0.8em 0;
+            padding-left: 1.6em !important;
+        }
+        #content-preview ul { list-style-type: disc !important; }
+        #content-preview ol { list-style-type: decimal !important; }
+        #content-preview ul > li, #content-preview ol > li {
+            list-style-type: inherit !important;
+            margin: 0.3em 0;
+        }
         #content-textarea {
             width: 100%;
             height: 100%;
@@ -571,6 +586,20 @@
             background: #fafafa;
         }
         .section-content-preview.expanded { max-height: none; }
+        /* 同 #content-preview 那条：覆盖 Materialize 对 ul/li 的全局重置，
+           否则 marked.js 渲染出的列表会丢加粗/项目符号。 */
+        .section-content-preview strong, .section-content-preview b { font-weight: bold !important; }
+        .section-content-preview em, .section-content-preview i { font-style: italic; }
+        .section-content-preview ul, .section-content-preview ol {
+            margin: 0.6em 0;
+            padding-left: 1.6em !important;
+        }
+        .section-content-preview ul { list-style-type: disc !important; }
+        .section-content-preview ol { list-style-type: decimal !important; }
+        .section-content-preview ul > li, .section-content-preview ol > li {
+            list-style-type: inherit !important;
+            margin: 0.2em 0;
+        }
         /* #section-edit-portal is a sibling of #sections-container (not nested inside it),
            absolutely positioned within #content-area (already position:relative + overflow-y:
            auto) so it scrolls together with the list. positionSectionEditPortal() sets its
