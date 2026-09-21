@@ -814,9 +814,38 @@
             height: 28px;
             line-height: 28px;
         }
+        /* 确认/保存大纲/保存目录这几个动作都会触发后端联动同步（reconcile、大纲一致性
+           检查等），有明显处理耗时，之前点完按钮界面没有任何反馈、也没防重复点击。
+           这个遮罩盖住整个视口，处理期间挡掉所有交互，处理完立即隐藏。 */
+        #writing-busy-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 10000;
+            background: rgba(255, 255, 255, 0.6);
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+        }
+        #writing-busy-overlay.active { display: flex; }
+        #writing-busy-text {
+            margin-top: 14px;
+            color: #3949ab;
+            font-size: 13px;
+        }
     </style>
 </head>
 <body>
+<div id="writing-busy-overlay">
+    <div class="preloader-wrapper small active">
+        <div class="spinner-layer spinner-blue-only">
+            <div class="circle-clipper left"><div class="circle"></div></div>
+            <div class="gap-patch"><div class="circle"></div></div>
+            <div class="circle-clipper right"><div class="circle"></div></div>
+        </div>
+    </div>
+    <div id="writing-busy-text">处理中，请稍候…</div>
+</div>
 <ul id="slide-out" class="sidenav" style="display:flex;flex-direction:column;">
     <li class="brand-logo center" style="flex-shrink:0;">TSAI</li>
     <li style="flex:1;"></li>
@@ -1191,6 +1220,20 @@
         return JSON.stringify(a) === JSON.stringify(b);
     }
 
+    // 确认段落/保存大纲/保存目录/应用大纲调整建议这几个动作都会触发后端联动同步
+    // （reconcile_writing_sections、大纲一致性检查等），耗时不是瞬间完成的——包在
+    // finishSettingsPatch/applyOutlineReview/confirmSection 这三个共用的底层函数里，
+    // 而不是分别在每个按钮的 click handler 里各包一遍，保证所有调用方（弹窗里的
+    // "确定"、外层"保存设置"、确认弹窗的"确定继续"、大纲建议的两个应用按钮等）
+    // 自动获得同一份遮罩行为，不用每加一个新入口就手动补一遍。
+    function showBusy(text) {
+        document.getElementById('writing-busy-text').textContent = text || '处理中，请稍候…';
+        document.getElementById('writing-busy-overlay').classList.add('active');
+    }
+    function hideBusy() {
+        document.getElementById('writing-busy-overlay').classList.remove('active');
+    }
+
     function checkDirty() {
         settingsDirty = !deepEqual(localSettings, savedSettings);
         document.getElementById('btn-save-settings').disabled = !settingsDirty;
@@ -1241,19 +1284,24 @@
     // 共用的收尾逻辑：pending（needs_confirm）时原样把结果透传给调用方处理，
     // 否则把 reconcile 返回的规范化 outline/toc 写回、刷新过期时间戳、重载段落列表。
     async function finishSettingsPatch(payload) {
-        const result = await patchTaskWithReconcile(payload);
-        if (!result.ok) return result;
-        if (result.data.reconcile) applyReconcileResultToSettings(result.data.reconcile);
-        const tr = await fetch(`/writing/tasks/${TASK_ID}`);
-        if (tr.ok) {
-            const td = await tr.json();
-            taskTimestamps = {
-                outline_updated_at: td.outline_updated_at || null,
-                toc_updated_at: td.toc_updated_at || null,
-            };
+        showBusy('保存中，正在同步目录/段落…');
+        try {
+            const result = await patchTaskWithReconcile(payload);
+            if (!result.ok) return result;
+            if (result.data.reconcile) applyReconcileResultToSettings(result.data.reconcile);
+            const tr = await fetch(`/writing/tasks/${TASK_ID}`);
+            if (tr.ok) {
+                const td = await tr.json();
+                taskTimestamps = {
+                    outline_updated_at: td.outline_updated_at || null,
+                    toc_updated_at: td.toc_updated_at || null,
+                };
+            }
+            await loadSections(TASK_ID);
+            return result;
+        } finally {
+            hideBusy();
         }
-        await loadSections(TASK_ID);
-        return result;
     }
 
     // 弹窗内"确定"即保存（style_req/content_req/outline/reference_files 统一走这里，
@@ -1309,40 +1357,45 @@
     async function applyOutlineReview(scope, extraPayload) {
         const review = currentOutlineReview;
         if (!review) return;
-        const payload = Object.assign({
-            scope,
-            section_suggestion: review.section_suggestion || null,
-            overall_suggestion: review.overall_suggestion || null,
-            retrofits: review.retrofits || [],
-        }, extraPayload || {});
-        const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${review.section_id}/apply_outline_review`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || '应用失败');
-        if (d.needs_confirm) {
-            // 整体方案自己也可能撞上 >3 高风险归档的阈值——复用现成的确认弹窗，
-            // 而不是再造一套；确认后带 confirm_reconcile:true 重放同一次 apply。
-            pendingOutlineReviewRetry = () => applyOutlineReview(scope, {confirm_reconcile: true});
-            renderReconcilePreview(d.reconcile_preview);
-            M.Modal.getInstance(document.getElementById('modal-reconcile-confirm')).open();
-            return;
+        showBusy('正在应用大纲调整…');
+        try {
+            const payload = Object.assign({
+                scope,
+                section_suggestion: review.section_suggestion || null,
+                overall_suggestion: review.overall_suggestion || null,
+                retrofits: review.retrofits || [],
+            }, extraPayload || {});
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${review.section_id}/apply_outline_review`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(d.detail || '应用失败');
+            if (d.needs_confirm) {
+                // 整体方案自己也可能撞上 >3 高风险归档的阈值——复用现成的确认弹窗，
+                // 而不是再造一套；确认后带 confirm_reconcile:true 重放同一次 apply。
+                pendingOutlineReviewRetry = () => applyOutlineReview(scope, {confirm_reconcile: true});
+                renderReconcilePreview(d.reconcile_preview);
+                M.Modal.getInstance(document.getElementById('modal-reconcile-confirm')).open();
+                return;
+            }
+            currentOutlineReview = null;
+            await loadSections(TASK_ID);
+            const tr = await fetch(`/writing/tasks/${TASK_ID}`);
+            if (tr.ok) {
+                const td = await tr.json();
+                localSettings.outline = savedSettings.outline = td.outline || '';
+                localSettings.toc = savedSettings.toc = td.toc || '';
+                taskTimestamps = {
+                    outline_updated_at: td.outline_updated_at || null,
+                    toc_updated_at: td.toc_updated_at || null,
+                };
+            }
+            M.toast({html: '大纲已调整', classes: 'indigo'});
+        } finally {
+            hideBusy();
         }
-        currentOutlineReview = null;
-        await loadSections(TASK_ID);
-        const tr = await fetch(`/writing/tasks/${TASK_ID}`);
-        if (tr.ok) {
-            const td = await tr.json();
-            localSettings.outline = savedSettings.outline = td.outline || '';
-            localSettings.toc = savedSettings.toc = td.toc || '';
-            taskTimestamps = {
-                outline_updated_at: td.outline_updated_at || null,
-                toc_updated_at: td.toc_updated_at || null,
-            };
-        }
-        M.toast({html: '大纲已调整', classes: 'indigo'});
     }
 
     function loadSettingsFromTask(task) {
@@ -2157,6 +2210,7 @@
         if (!TASK_ID) return;
         const sec = sections.find(s => s.id === sectionId);
         const newStatus = (sec && sec.status === 'confirmed') ? 'draft' : 'confirmed';
+        showBusy(newStatus === 'confirmed' ? '确认中…' : '取消确认中…');
         try {
             const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}`, {
                 method: 'PATCH',
@@ -2169,9 +2223,15 @@
             // 确认（非取消确认）时，后端可能顺带跑了一次和"生成"完全同一套的大纲
             // 一致性检查（见 writing.py:patch_section）；有建议就复用同一个弹窗，
             // 用户选"只调整本段"还是"调整整体"，和生成流程完全一致的处理方式。
-            if (newStatus === 'confirmed' && d.outline_review) openOutlineReviewModal(d.outline_review);
+            if (newStatus === 'confirmed' && d.outline_review) {
+                openOutlineReviewModal(d.outline_review);
+            } else {
+                M.toast({html: newStatus === 'confirmed' ? '已确认' : '已取消确认', classes: 'indigo'});
+            }
         } catch (e) {
             M.toast({html: '操作失败：' + e.message, classes: 'red'});
+        } finally {
+            hideBusy();
         }
     }
 

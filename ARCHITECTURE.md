@@ -760,6 +760,7 @@ body (flex row, ≥993px)
 - **SSE 流式输出**：写作模块所有流式端点（`generate_style`/`generate_outline`/`generate_content`/`generate_toc`/`generate_outline_from_toc`/分段 `generate`/`distill_style` 等）均返回 `StreamingResponse(media_type="text/event-stream")`；每个文本块经 `writing.py:_sse_chunk()` JSON 编码后再放入 `data: ...\n\n` 帧（而非裸文本拼接），避免模型输出中的换行符被前端按行解析的 SSE 逻辑误判为帧结束、导致内容截断；前端 `decodeSseData()` 对应解码，结束标志仍是 `data: [DONE]\n\n`
 - **参考资料 RAG 过滤**：`query_rag()` 支持 `source_files` 参数，只从指定文件的 chunks 中检索
 - **内容流式显示**：SSE 流式输出时用 `preview.textContent +=` 追加（安全），流完成后调用 `exitEditMode()` 渲染 Markdown
+- **联动同步动作的忙碌遮罩**：确认/取消确认段落、保存大纲/目录（含触发 reconcile）、应用大纲调整建议这几个动作都有明显的后端处理耗时（reconcile 的多次 SQL、`_check_outline_drift` 的一次非流式 Gemini 调用等），且之前点击期间界面无任何反馈、可重复点击。`showBusy()`/`hideBusy()`（`#writing-busy-overlay`，全视口遮罩 + Materialize 小号 spinner）包在共用的底层函数 `finishSettingsPatch`/`applyOutlineReview`/`confirmSection` 里，而不是分散在各个按钮的 click handler——所有调用方（弹窗内"确定"、外层"保存设置"、`#modal-reconcile-confirm` 的"确定继续"、大纲建议的两个应用按钮）自动获得一致的遮罩行为
 
 ### 十一.4 TOC / 分段写作系统
 
