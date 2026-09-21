@@ -12,6 +12,24 @@ h1,h2,h3,h4,h5,h6 {
 .message i {
     font-style: italic !important;
 }
+/* Materialize 全局把 ul:not(.browser-default) 和其下的 li 都重置成
+   list-style-type:none、padding-left:0（给它自己的 collection/nav 组件用的），
+   marked.js 渲染的聊天消息里的 <ul>/<ol> 没有 browser-default class，会一起被
+   重置掉，导致无序/有序列表在气泡里完全没有项目符号。和上面 strong/em 是同一类修复
+   （写作模块 templates/writing.html 的 #content-preview / .section-content-preview
+   也有一份，三处保持一致）。 */
+.message ul,
+.message ol {
+    margin: 0.5em 0;
+    padding-left: 1.6em !important;
+}
+.message ul { list-style-type: disc !important; }
+.message ol { list-style-type: decimal !important; }
+.message ul > li,
+.message ol > li {
+    list-style-type: inherit !important;
+    margin: 0.2em 0;
+}
 
 /* 整体布局：侧边栏 + 主内容 */
 body {
