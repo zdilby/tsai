@@ -44,7 +44,7 @@ from backend.db import (
     save_writing_evaluation,
     get_latest_evaluation,
 )
-from backend.rag import get_embedding, query_rag
+from backend.rag import get_embedding, query_rag_by_files
 
 _FORMAT_SYSTEM = (
     "你是一个专业的中文文章 Markdown 排版助手。\n"
@@ -554,11 +554,7 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
     if reference_files:
         query_text = f"{task['title']} {task['content_req']}"
         embedding = await get_embedding(embed_client, query_text)
-        rag_results = await query_rag(
-            embedding,
-            session_id=str(task["session_id"]),
-            source_files=reference_files,
-        )
+        rag_results = await query_rag_by_files(embedding, user["id"], reference_files)
         rag_text = "\n".join(r["content"] for r in rag_results)
     else:
         rag_text = ""
@@ -676,11 +672,7 @@ async def writing_task_chat(
     if reference_files:
         query_text = f"{message} {task['title']}"
         embedding = await get_embedding(embed_client, query_text)
-        rag_results = await query_rag(
-            embedding,
-            session_id=str(task["session_id"]),
-            source_files=reference_files,
-        )
+        rag_results = await query_rag_by_files(embedding, user["id"], reference_files)
         rag_text = "\n".join(r["content"] for r in rag_results)
 
     system_instruction = _chat_system_instruction("文章", "[WRITING_UPDATE_START]", "[WRITING_UPDATE_END]")
@@ -689,7 +681,14 @@ async def writing_task_chat(
         f"\n\n## 当前文章内容（共约 {len(current_content)} 字）\n\n{current_content}"
         if current_content else "\n\n## 当前文章内容\n\n（尚未生成内容）"
     )
-    rag_block = f"\n\n## 参考资料片段\n\n{rag_text}" if rag_text else ""
+    # 参考资料文件名单独列出、不依赖检索是否命中——本轮用户消息可能是"设置了哪些
+    # 参考资料"这类元问题，跟资料本身内容语义不相关，向量检索大概率查不到任何片段，
+    # 但模型至少该知道任务配置了哪些文件，而不是完全不知道这件事的存在。
+    ref_files_block = (
+        f"\n\n## 已设置的参考资料文件\n{chr(10).join('- ' + f for f in reference_files)}"
+        if reference_files else ""
+    )
+    rag_block = f"\n\n## 参考资料检索到的相关片段\n\n{rag_text}" if rag_text else ""
 
     await save_message(task["session_id"], "user", message)
     context = await get_context(task["session_id"], limit=settings.max_history_turns)
@@ -707,6 +706,7 @@ async def writing_task_chat(
         f"内容要求：{task['content_req']}\n"
         f"大纲：\n{task['outline']}"
         f"{content_block}"
+        f"{ref_files_block}"
         f"{rag_block}"
         f"{history_block}"
         f"\n\n## 用户最新消息\n\n{message}"
@@ -959,11 +959,7 @@ async def generate_section_image_prompt(
     if reference_files:
         q = f"{task['title']} {section['heading']} {marker_text}"
         embedding = await get_embedding(embed_client, q)
-        rag_results = await query_rag(
-            embedding,
-            session_id=str(task["session_id"]),
-            source_files=reference_files,
-        )
+        rag_results = await query_rag_by_files(embedding, user["id"], reference_files)
         rag_text = "\n".join(r["content"] for r in rag_results)
 
     prompt = (
@@ -1162,11 +1158,7 @@ async def generate_section_content(
     if reference_files:
         q = f"{task['title']} {section['heading']} {task['content_req']}"
         embedding = await get_embedding(embed_client, q)
-        rag_results = await query_rag(
-            embedding,
-            session_id=str(task["session_id"]),
-            source_files=reference_files,
-        )
+        rag_results = await query_rag_by_files(embedding, user["id"], reference_files)
         rag_text = "\n".join(r["content"] for r in rag_results)
 
     # Previous section's full content for continuity——不再只取结尾 800 字：段落可能被
@@ -1400,11 +1392,7 @@ async def section_chat(
     rag_text = ""
     if reference_files:
         embedding = await get_embedding(embed_client, f"{message} {section['heading']}")
-        rag_results = await query_rag(
-            embedding,
-            session_id=str(task["session_id"]),
-            source_files=reference_files,
-        )
+        rag_results = await query_rag_by_files(embedding, user["id"], reference_files)
         rag_text = "\n".join(r["content"] for r in rag_results)
 
     system_instruction = _chat_system_instruction(
@@ -1416,7 +1404,13 @@ async def section_chat(
         f"\n\n## 当前章节内容\n\n{section.get('content', '')}"
         if section.get("content") else "\n\n## 当前章节内容\n\n（尚未生成内容）"
     )
-    rag_block = f"\n\n## 参考资料片段\n\n{rag_text}" if rag_text else ""
+    # 同 writing_task_chat：文件名单独列出、不依赖检索是否命中，避免模型对"设置了
+    # 哪些参考资料"这类元问题完全没有信息来源。
+    ref_files_block = (
+        f"\n\n## 已设置的参考资料文件\n{chr(10).join('- ' + f for f in reference_files)}"
+        if reference_files else ""
+    )
+    rag_block = f"\n\n## 参考资料检索到的相关片段\n\n{rag_text}" if rag_text else ""
 
     await save_message(task["session_id"], "user", message)
     context = await get_context(task["session_id"], limit=settings.max_history_turns)
@@ -1429,7 +1423,7 @@ async def section_chat(
     prompt = (
         f"## 写作任务\n标题：{task['title']}\n风格：{task['style_req']}\n内容要求：{task['content_req']}\n"
         f"## 当前章节：{section['heading']}\n章节大纲：{section.get('sub_outline', '')}"
-        f"{content_block}{rag_block}{history_block}\n\n## 用户最新消息\n\n{message}"
+        f"{content_block}{ref_files_block}{rag_block}{history_block}\n\n## 用户最新消息\n\n{message}"
     )
 
     grounding_tool = gtypes.Tool(google_search=gtypes.GoogleSearch())
@@ -1478,11 +1472,7 @@ async def section_image_chat(
     rag_text = ""
     if reference_files:
         embedding = await get_embedding(embed_client, f"{message} {section['heading']} {marker_text}")
-        rag_results = await query_rag(
-            embedding,
-            session_id=str(task["session_id"]),
-            source_files=reference_files,
-        )
+        rag_results = await query_rag_by_files(embedding, user["id"], reference_files)
         rag_text = "\n".join(r["content"] for r in rag_results)
 
     system_instruction = _chat_system_instruction(
@@ -1669,11 +1659,7 @@ async def evaluate_content(task_id: str, section_id: Optional[str] = None, user:
     if reference_files and (style_skills or style_req or style_source):
         try:
             embedding = await get_embedding(embed_client, "写作风格 语气 句式 词汇 叙述")
-            rag_results = await query_rag(
-                embedding,
-                session_id=str(task["session_id"]),
-                source_files=reference_files,
-            )
+            rag_results = await query_rag_by_files(embedding, user["id"], reference_files)
             rag_text = "\n".join(r["content"] for r in rag_results)
         except Exception:
             pass

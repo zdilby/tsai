@@ -70,6 +70,47 @@ async def query_rag(query_embedding, session_id: str, source_files: list = None)
     return selected
 
 
+# 按文件名跨 session 检索（写作模块"参考资料"专用）。
+# 写作任务自己的 session（is_writing_session=TRUE）从来没有文件上传进去过——用户上传
+# 文件都是在普通对话 session 里，写作模块的"参考资料"选择器（get_user_processed_files）
+# 本来就是跨全部 session、按用户聚合出来的文件名列表。之前 writing.py 各处直接复用
+# query_rag(session_id=写作任务自己的 session_id, source_files=...)，WHERE 条件里的
+# session_id 永远匹配不上文件实际所在的那个 session，查询结果永远是空——参考资料等于
+# 完全没生效。这里改成按 user_id 关联 sessions 表，不限定 session_id，只按文件名 + 该
+# 用户名下所有 session 检索，才是"参考资料"这个功能名副其实该有的语义。
+async def query_rag_by_files(query_embedding, user_id: int, source_files: list) -> list:
+    if not source_files:
+        return []
+    query = """
+        SELECT kb.content, kb.original_content, kb.source_file, kb.chunk_index,
+               (kb.embedding <=> $2) AS distance
+        FROM knowledge_base kb
+        JOIN sessions s ON kb.session_id = s.id
+        WHERE s.user_id = $1
+          AND kb.source_file = ANY($3)
+          AND (kb.embedding <=> $2) < $4
+        ORDER BY kb.embedding <=> $2
+        LIMIT $5
+    """
+    vector = Vector(query_embedding)
+    async with database._backend._pool.acquire() as conn:
+        await register_vector(conn)
+        await conn.execute(f"SET LOCAL hnsw.ef_search = {settings.hnsw_ef_search}")
+        rows = await conn.fetch(
+            query, user_id, vector, source_files, settings.rag_distance_threshold, settings.top_k_max,
+        )
+    candidates = [dict(r) for r in rows]
+    selected = _dynamic_select(
+        candidates, settings.top_k, settings.top_k_max,
+        settings.top_k_margin, settings.top_k_gap
+    )
+    distances = [round(r['distance'], 3) for r in candidates]
+    logger.info("参考资料 RAG: %d候选%s → 选取%d条 (margin=%.2f, gap=%.2f)",
+                len(candidates), distances, len(selected),
+                settings.top_k_margin, settings.top_k_gap)
+    return selected
+
+
 # 语义检索历史消息（仅 assistant，用于回答「我们聊过 X 吗」类问题）
 async def query_history(query_embedding, session_id: str,
                         limit: int = 3, threshold: float = 0.4,

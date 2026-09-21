@@ -759,7 +759,9 @@ body (flex row, ≥993px)
 
 - **写作 Session 隔离**：`GET /sessions` 增加 `AND (is_writing_session = FALSE OR is_writing_session IS NULL)` 过滤，写作 session 不出现在对话页面
 - **SSE 流式输出**：写作模块所有流式端点（`generate_style`/`generate_outline`/`generate_content`/`generate_toc`/`generate_outline_from_toc`/分段 `generate`/`distill_style` 等）均返回 `StreamingResponse(media_type="text/event-stream")`；每个文本块经 `writing.py:_sse_chunk()` JSON 编码后再放入 `data: ...\n\n` 帧（而非裸文本拼接），避免模型输出中的换行符被前端按行解析的 SSE 逻辑误判为帧结束、导致内容截断；前端 `decodeSseData()` 对应解码，结束标志仍是 `data: [DONE]\n\n`
-- **参考资料 RAG 过滤**：`query_rag()` 支持 `source_files` 参数，只从指定文件的 chunks 中检索
+- **参考资料 RAG 检索**：`backend/rag.py:query_rag_by_files(query_embedding, user_id, source_files)`——按 `user_id` 关联 `sessions` 表、跨该用户全部 session 检索，只按 `source_file` 过滤，不限定某一个 `session_id`。
+  - **踩过的坑（参考资料曾经从未真正生效过）**：写作模块"参考资料"选择器（`GET /writing/files` → `get_user_processed_files`）本来就是跨用户全部 session 聚合出的文件名列表，因为文件是在普通对话 session 里上传的；但写作任务自己有一个专属的 `is_writing_session=TRUE` session（`create_writing_task` 建的），这个 session 从来没有文件上传进去过。此前所有引用参考资料的地方（段落/全文生成、写作对话、段落对话、配图 prompt 对话/生成、风格评估）统一复用主对话的 `query_rag(session_id=写作任务自己的 session_id, source_files=...)`，`WHERE session_id = ...` 永远匹配不上文件实际所在的那个 session，检索结果永远是空列表——参考资料选了等于没选，且不报错、无感知。改用 `query_rag_by_files`（按 `user_id` 而非 `session_id` 过滤）修复。
+  - **写作/段落对话额外的坑**：`writing_task_chat`/`section_chat` 的 prompt 之前只在检索到片段时才提"参考资料片段"，从不把"设置了哪些参考资料文件"这个事实本身告诉模型——用户问"这次写作设置了什么参考资料"这类元问题，语义上检索不到任何实际内容片段，模型完全不知道任务配置了参考资料，只能编造模糊回答。修复：新增 `ref_files_block`，无条件列出已设置的文件名（不依赖检索是否命中），和检索到的片段分成两个独立小节。
 - **内容流式显示**：SSE 流式输出时用 `preview.textContent +=` 追加（安全），流完成后调用 `exitEditMode()` 渲染 Markdown
 - **联动同步动作的忙碌遮罩**：确认/取消确认段落、保存大纲/目录（含触发 reconcile）、应用大纲调整建议这几个动作都有明显的后端处理耗时（reconcile 的多次 SQL、`_check_outline_drift` 的一次非流式 Gemini 调用等），且之前点击期间界面无任何反馈、可重复点击。`showBusy()`/`hideBusy()`（`#writing-busy-overlay`，全视口遮罩 + Materialize 小号 spinner）包在共用的底层函数 `finishSettingsPatch`/`applyOutlineReview`/`confirmSection` 里，而不是分散在各个按钮的 click handler——所有调用方（弹窗内"确定"、外层"保存设置"、`#modal-reconcile-confirm` 的"确定继续"、大纲建议的两个应用按钮）自动获得一致的遮罩行为
 
