@@ -563,7 +563,9 @@
             color: #e65100;
             font-weight: 600;
             flex-shrink: 0;
+            cursor: pointer;
         }
+        .section-stale-badge:hover { background: #ffe0b2; }
         .section-card-actions {
             display: flex;
             gap: 6px;
@@ -1718,7 +1720,7 @@
                 <div class="section-card-header" onclick="toggleSectionCard('${sec.id}')">
                     <span class="section-card-heading">§${i+1} ${escHtml(sec.heading)}</span>
                     <span class="section-status-badge ${statusClass}">${statusLabel(sec.status)}</span>
-                    ${stale ? '<span class="section-stale-badge" title="大纲或目录已更新，建议重新生成">⚠ 过期</span>' : ''}
+                    ${stale ? `<span class="section-stale-badge" title="大纲或目录已更新，建议重新生成——点击可仅关闭这次提示，不会修改正文/大纲/目录" onclick="event.stopPropagation(); dismissStale('${sec.id}')">⚠ 过期</span>` : ''}
                     <div class="section-card-actions" onclick="event.stopPropagation()">
                         <button class="btn-flat waves-effect btn-small" style="padding:0 8px;font-size:12px;color:#5c6bc0" onclick="generateSection('${sec.id}')" title="${sec.status === 'confirmed' ? '请先取消确认才能生成' : '生成内容'}" ${(editWindowOpen || sec.status === 'confirmed') ? 'disabled' : ''}>生成</button>
                         <button class="btn-flat waves-effect btn-small" style="padding:0 8px;font-size:12px" onclick="formatSection('${sec.id}')" title="${sec.status === 'confirmed' ? '请先取消确认才能排版' : '排版优化'}" ${(hasContent && !editWindowOpen && sec.status !== 'confirmed') ? '' : 'disabled'}>排版</button>
@@ -2228,6 +2230,27 @@
             } else {
                 M.toast({html: newStatus === 'confirmed' ? '已确认' : '已取消确认', classes: 'indigo'});
             }
+        } catch (e) {
+            M.toast({html: '操作失败：' + e.message, classes: 'red'});
+        } finally {
+            hideBusy();
+        }
+    }
+
+    // 只关闭"⚠ 过期"提示本身，不碰正文/heading/status，也不触发大纲一致性检查——
+    // 之前唯一能让 isSectionStale() 变回 false 的办法是编辑正文或点确认，但这段
+    // 内容压根不需要改，点确认还会顺带再跑一次大纲检查、可能又建议改大纲，形成
+    // "改大纲 → 全部段落标过期 → 点确认想消掉过期 → 又建议改大纲 → 又全部过期"
+    // 的死循环。后端 dismiss_stale 复用的是 touch_section_generated_at 这同一个
+    // 原语（只把 last_generated_at 打成 NOW()），语义上就是"我知道大纲变了，
+    // 这段我看过、确认不需要跟进"，和 patch_section 里已有的用法完全一致。
+    async function dismissStale(sectionId) {
+        if (!TASK_ID) return;
+        showBusy('处理中…');
+        try {
+            const r = await fetch(`/writing/tasks/${TASK_ID}/sections/${sectionId}/dismiss_stale`, {method: 'POST'});
+            if (!r.ok) throw new Error(await r.text());
+            await loadSections(TASK_ID);
         } catch (e) {
             M.toast({html: '操作失败：' + e.message, classes: 'red'});
         } finally {

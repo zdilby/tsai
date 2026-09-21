@@ -123,6 +123,7 @@ tsai/
 | `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status）。只传 `content` 且没显式传 `heading` 时，若正文首行是 `## 新标题`，自动同步为该段新标题并重算任务的 outline/toc 派生文本（响应带 `heading_synced`），见十一.4.1。`status` 传 `confirmed`（即"确认"定稿）时，若别的段落已有内容，额外跑一次和"生成"完全同一套的大纲一致性检查，响应带 `outline_review`（无建议为 `null`），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落的**完整**正文作衔接，而不是摘要——内容可能被人工编辑过，衔接要看真实内容），完成后段落状态置为 `draft`；若任务里还有别的段落已有内容，额外跑一次大纲一致性检查，需要调整时在流末尾追加一个 `type:"outline_review"` 的信号帧（非文本分片），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/apply_outline_review` | 应用一致性检查提出的大纲调整建议（`scope: "section"｜"overall"`），见十一.4.2 |
+| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/dismiss_stale` | 只关闭该段的"⚠ 过期"提示（`touch_section_generated_at`），不改正文/heading/status，不触发任何大纲同步或一致性检查，见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/format` | 单段 Markdown 排版（同 Codex→Gemini 回退策略） |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/chat` | 单段 AI 对话，AI 用 `[SECTION_UPDATE_START]...[SECTION_UPDATE_END]` 包裹修改后该段内容 |
 | `GET` | `/writing/tasks/{task_id}/full_content` | 拼接所有 `draft`/`confirmed` 状态段落为完整正文（分段视图 → 全文视图），响应含 `skipped_headings`（未生成/非 draft-confirmed 的章节标题列表） |
@@ -838,6 +839,8 @@ prompt 明确要求"优先只给本段建议，非必要不提整体建议"、"�
 **前端**（`templates/writing.html`）：写作目录弹窗（AI 生成 + "双向生成"——大纲↔TOC 互相推导）；分段卡片视图，含状态徽章、生成/排版/确认/放大操作、大纲变更后的"⚠过期"标记（比较 `outline_updated_at`/`toc_updated_at` 时间戳）；分段/全文视图切换；合并结果的 toast 提示会附上被跳过的章节标题。
 
 **过期检测**：`outline`、`toc` 每次更新都各自打时间戳（`outline_updated_at`/`toc_updated_at`），前端据此判断"大纲改了但 TOC/分段还没同步"，提示用户重新生成。
+
+**忽略过期提示**（`POST .../sections/{section_id}/dismiss_stale`）：`isSectionStale()` 是纯时间戳比较，没有独立的"已忽略"状态，之前唯一能关掉"⚠ 过期"的办法是编辑正文或点"确认"——但很多时候这段内容根本不需要改，点"确认"还会顺带触发一次大纲一致性检查（十一.4.2），检查若建议改大纲，会让其它段落又重新标"过期"，容易形成死循环。`dismiss_stale` 复用 `touch_section_generated_at`（只把这段的 `last_generated_at` 打成 `NOW()`，不碰 content/heading/status，不触发任何大纲同步或一致性检查）。前端点"⚠ 过期"徽章本身即触发（`event.stopPropagation()` 避免连带展开/收起卡片）。
 
 **已知坑：flex 容器内 `<textarea>` 不会自动撑满交叉轴高度**——`.section-edit-window-body`（编辑浮窗内容区）是 `display:flex` 的行容器，早期只给内部 `<textarea>` 设了 `flex:1`（只影响主轴/宽度），导致 `<textarea>` 退回浏览器默认 `rows` 高度（约 45px）而非撑满父容器；`draftContent`/`textarea.value` 数据其实完整，只是超出这 45px 的部分被裁进不可见的 `overflow-y:auto` 滚动区域，看起来像"内容只剩标题一行"。修复：显式给 `.section-edit-window-body textarea` 加 `height: 100%`（`<textarea>` 作为表单控件不会像普通块级元素一样被 `align-items:stretch` 自动拉伸）。
 

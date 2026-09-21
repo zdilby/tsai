@@ -1332,6 +1332,29 @@ async def apply_outline_review(
     return {"success": True, "reconcile": result}
 
 
+@writing_router.post("/tasks/{task_id}/sections/{section_id}/dismiss_stale")
+async def dismiss_section_stale(
+    task_id: str,
+    section_id: str,
+    user: dict = Depends(require_write_access),
+):
+    """只关闭"⚠ 过期"提示，不改正文/heading/status，不触发任何大纲同步或一致性检查。
+
+    isSectionStale()（前端）纯粹是"大纲/目录更新时间 > 本段最后生成时间"的比较，
+    没有独立的"已忽略"标记；唯一让它变回 false 的办法之前是编辑正文或点"确认"——
+    但很多时候这段内容根本不需要改，而点"确认"现在还会顺带触发一次大纲一致性
+    检查（见 patch_section），检查又可能建议改大纲，改大纲又会让其它段落全部
+    重新标"过期"，容易形成死循环。复用 touch_section_generated_at 这个既有原语
+    （只把 last_generated_at 打成 NOW()）就是这里要的语义："我看过了，这段不需要
+    跟进，不用再提醒我"。
+    """
+    await _ensure_task_owner(task_id, user["id"])
+    if not await get_writing_section(section_id, task_id):
+        raise HTTPException(status_code=404, detail="段落不存在")
+    await touch_section_generated_at(section_id, task_id)
+    return {"success": True}
+
+
 @writing_router.post("/tasks/{task_id}/sections/{section_id}/format")
 async def format_section_content(
     task_id: str,
