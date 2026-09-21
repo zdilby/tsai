@@ -578,20 +578,38 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
 
     async def generator():
         if use_sectional:
-            per_section_words = max(1000, word_count // len(sections)) if word_count > 0 else 2000
             accumulated = ""
             for i, (sec_heading, sec_body) in enumerate(sections):
+                # word_count>0 时按总字数均分；否则按这一章自己的细纲篇幅估一个下限——
+                # 固定 2000 字不管细纲写了多详细都一样，细纲条目一多，2000 字根本不够
+                # 展开，模型只能把每条要点压成一句话带过（实测出现过大纲被压缩成空洞
+                # 概括的情况）。细纲写得越详细，说明作者想要的展开程度越高。
+                per_section_words = (
+                    max(1000, word_count // len(sections)) if word_count > 0
+                    else max(2000, len(sec_body) * 4)
+                )
                 context_hint = (
                     f"\n已完成内容（仅供风格参考，勿重复）：\n...{accumulated[-1200:]}"
                     if accumulated else ""
                 )
                 sec_outline = f"{sec_heading}\n{sec_body}".strip()
+                # 同 generate_section_content：字数是下限不是上限，大纲要点必须逐条
+                # 实质展开，参考资料要实质引用，不能为了凑字数/怕超字数反过来压缩内容。
+                outline_fidelity_note = (
+                    "\n本章节大纲里列出的每一个要点都必须在正文中得到实质展开，不能整条"
+                    "省略、合并压缩成一句话带过；字数目标是下限，不是上限——如果大纲要点"
+                    "较多，可以适度超出目标字数以保证完整覆盖，不要反过来删减、压缩要点。"
+                )
+                rag_fidelity_note = (
+                    "\n参考资料里的具体内容、数据、细节应该被实质性地引用、结合进正文，"
+                    "不是仅供背景了解、写作时不体现。"
+                ) if rag_text else ""
                 if not current_content:
                     sec_prompt = (
                         f"请为以下写作任务创作指定章节内容（Markdown，直接输出含章节标题的完整章节）：\n"
                         f"文章标题：{title}{style_block}内容要求：{content_req}\n"
-                        f"完整大纲：\n{outline}\n参考资料：\n{rag_text}\n"
-                        f"本章节大纲：\n{sec_outline}\n"
+                        f"完整大纲：\n{outline}\n参考资料：\n{rag_text}{rag_fidelity_note}\n"
+                        f"本章节大纲：\n{sec_outline}{outline_fidelity_note}\n"
                         f"本章节字数：约{per_section_words}字（第{i+1}/{len(sections)}章）"
                         f"{context_hint}\n直接输出本章节，不加任何额外说明。"
                     )
@@ -599,8 +617,8 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
                     sec_prompt = (
                         f"请优化以下写作任务指定章节（Markdown，输出含章节标题的完整章节）：\n"
                         f"文章标题：{title}{style_block}内容要求：{content_req}\n"
-                        f"完整大纲：\n{outline}\n参考资料：\n{rag_text}\n"
-                        f"本章节大纲：\n{sec_outline}\n"
+                        f"完整大纲：\n{outline}\n参考资料：\n{rag_text}{rag_fidelity_note}\n"
+                        f"本章节大纲：\n{sec_outline}{outline_fidelity_note}\n"
                         f"本章节字数：约{per_section_words}字（第{i+1}/{len(sections)}章）"
                         f"{context_hint}\n直接输出本章节完整内容，不加任何额外说明。"
                     )
@@ -619,18 +637,29 @@ async def generate_content(task_id: str, user: dict = Depends(require_write_acce
                     return
         else:
             word_hint = f"（必须达到约{word_count}字，不得提前结束）" if word_count > 0 else "（内容尽量详尽充实）"
+            outline_fidelity_note = (
+                "\n内容大纲里列出的每一个要点都必须在正文中得到实质展开，不能整条省略、"
+                "合并压缩成一句话带过；字数只是参考，不要为了控制篇幅反过来删减、压缩"
+                "大纲要点。"
+            )
+            rag_fidelity_note = (
+                "\n参考资料里的具体内容、数据、细节应该被实质性地引用、结合进正文，"
+                "不是仅供背景了解、写作时不体现。"
+            ) if rag_text else ""
             if not current_content:
                 prompt = (
                     f"请根据以下设置创作一篇完整的文章（Markdown 格式）{word_hint}：\n"
                     f"标题：{title}\n字数：{word_count}字{style_block}"
-                    f"内容要求：{content_req}\n内容大纲：\n{outline}\n参考资料：\n{rag_text}\n"
+                    f"内容要求：{content_req}\n内容大纲：\n{outline}{outline_fidelity_note}\n"
+                    f"参考资料：\n{rag_text}{rag_fidelity_note}\n"
                     f"直接输出文章内容，不要任何额外说明。"
                 )
             else:
                 prompt = (
                     f"请根据以下设置优化现有文章内容（Markdown 格式，重新输出完整内容）{word_hint}：\n"
                     f"标题：{title}\n字数：{word_count}字{style_block}"
-                    f"内容要求：{content_req}\n内容大纲：\n{outline}\n参考资料：\n{rag_text}\n"
+                    f"内容要求：{content_req}\n内容大纲：\n{outline}{outline_fidelity_note}\n"
+                    f"参考资料：\n{rag_text}{rag_fidelity_note}\n"
                     f"当前内容（仅供参考，优化时可改动）：\n{current_content[:3000]}\n"
                     f"直接输出完整优化后的文章，不要任何额外说明。"
                 )
@@ -1176,14 +1205,35 @@ async def generate_section_content(
             prev_section = s
     prev_full = (prev_section or {}).get("content", "")
 
-    wc_target = section.get("word_count_target") or 0
-    if wc_target == 0:
-        wc = (task.get("word_count") or 0)
-        wc_target = (wc // len(all_secs)) if (wc > 0 and all_secs) else 2000
-
     heading = section["heading"]
     sub_outline = section.get("sub_outline") or ""
     sec_outline = (f"## {heading}\n{sub_outline}").strip() if sub_outline else f"## {heading}"
+
+    wc_target = section.get("word_count_target") or 0
+    if wc_target == 0:
+        wc = (task.get("word_count") or 0)
+        if wc > 0 and all_secs:
+            wc_target = wc // len(all_secs)
+        else:
+            # 之前不管细纲写了多详细都固定给 2000 字，细纲条目一多（比如这段细纲列了
+            # 十几个要点），2000 字根本不够展开，模型只能把每条压成一句话带过，出现过
+            # "详细分条大纲被压缩成几句话空洞概括"的情况。按细纲本身的篇幅估一个更
+            # 合理的下限——细纲写得越详细，说明作者想要的展开程度越高。
+            wc_target = max(2000, len(sub_outline) * 4)
+
+    # 字数目标只是下限参考，不是硬上限——防止模型为了不超字数反过来删减、压缩大纲
+    # 要点，这是实测出现过的真实问题：大纲被大幅压缩、内容空洞、参考资料引用不足。
+    outline_fidelity_note = (
+        "\n本章节大纲里列出的每一个要点都必须在正文中得到实质展开，不能整条省略、"
+        "合并压缩成一句话带过，或者只重复标题字面不展开论述；大纲的大点/子点层级"
+        "关系应该体现在正文详略安排上。字数目标是下限，不是上限——如果大纲要点较多、"
+        "内容确实丰富，可以适度超出目标字数以保证完整覆盖，不要为了凑够或卡在目标"
+        "字数而反过来删减、压缩大纲要点。"
+    )
+    rag_fidelity_note = (
+        "\n参考资料里的具体内容、数据、细节应该被实质性地引用、结合进正文来充实论述，"
+        "不是仅供背景了解、写作时不体现。"
+    ) if rag_text else ""
     if prev_full and prev_section and prev_section.get("status") == "confirmed":
         # 紧邻的上一段已经被作者确认定稿——不只是"衔接依据"，更代表作者认可的最终
         # 文字风格，权重应该比一般的"上一段草稿"更高，明确提示模型先读一遍再动笔。
@@ -1232,8 +1282,8 @@ async def generate_section_content(
     prompt = (
         f"请为以下写作任务创作指定章节内容（Markdown，直接输出含 ## 章节标题的完整章节）：\n"
         f"文章标题：{task['title']}{_style_block}{confirmed_style_hint}内容要求：{task['content_req']}\n"
-        f"完整大纲：\n{task.get('outline', '')}\n参考资料：\n{rag_text}\n"
-        f"本章节大纲：\n{sec_outline}\n本章节字数：约{wc_target}字"
+        f"完整大纲：\n{task.get('outline', '')}\n参考资料：\n{rag_text}{rag_fidelity_note}\n"
+        f"本章节大纲：\n{sec_outline}{outline_fidelity_note}\n本章节字数：约{wc_target}字"
         f"{context_hint}\n直接输出本章节完整内容，不加任何额外说明。"
     )
     gen_config = gtypes.GenerateContentConfig(max_output_tokens=65536)

@@ -120,7 +120,7 @@ tsai/
 | `POST` | `/writing/tasks/{task_id}/generate_content` | SSE 流式生成/优化写作内容（含 RAG 参考资料检索）；大纲 ≥2 章节且总字数=0 或 ≥3000 时自动切换为**逐章节生成**（`use_sectional`），每章独立调用并携带前文尾部 1200 字作衔接提示 |
 | `POST` | `/writing/tasks/{task_id}/chat` | 写作 AI 对话（全文级）；AI 用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` 包裹修改后全文 |
 | `GET` | `/writing/tasks/{task_id}/sections` | 获取任务的全部分段（`writing_sections`，按 `section_index` 排序） |
-| `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status）。只传 `content` 且没显式传 `heading` 时，若正文首行是 `## 新标题`，自动同步为该段新标题并重算任务的 outline/toc 派生文本（响应带 `heading_synced`），见十一.4.1。`status` 传 `confirmed`（即"确认"定稿）时，若别的段落已有内容，额外跑一次和"生成"完全同一套的大纲一致性检查，响应带 `outline_review`（无建议为 `null`），见十一.4.2 |
+| `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status）。只传 `content` 且没显式传 `heading` 时，若正文首行是 `## 新标题`，自动同步为该段新标题并重算任务的 outline/toc 派生文本（响应带 `heading_synced`），见十一.4.1。`status` 传 `confirmed`（即"确认"定稿）时，若别的段落已有内容，额外跑一次大纲一致性检查（`_check_outline_drift`，这是它**唯一**的触发点，生成/排版不再触发），响应带 `outline_review`（无建议为 `null`），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落的**完整**正文作衔接，而不是摘要——内容可能被人工编辑过，衔接要看真实内容；已确认段落额外作为更高权重的风格参考），完成后段落状态置为 `draft`。**不跑大纲一致性检查**（该检查只在"确认"时跑，见十一.4.2）——生成/排版应该是"照着大纲写"，不该反过来擅自大改大纲 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/apply_outline_review` | 应用一致性检查提出的大纲调整建议（`scope: "section"｜"overall"`），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/dismiss_stale` | 只关闭该段的"⚠ 过期"提示（`touch_section_generated_at`），不改正文/heading/status，不触发任何大纲同步或一致性检查，见十一.4.2 |
@@ -818,6 +818,12 @@ body (flex row, ≥993px)
 **内容以人工编辑为准，大纲是从属描述**：`templates/writing.html` 段落卡片只在 `!hasContent` 时才显示 `sub_outline` 片段——已经有内容（生成过或被人工编辑替换过）的段落，实际内容可能早就偏离了当初的大纲，继续展示这份大纲容易误导，且不强制要求两者保持一致。
 
 **生成时内容优先于大纲**：`generate_section_content`（`writing.py`）衔接上下文从"上一段结尾 800 字"改成上一段**完整**正文（`prev_full`，不截断），prompt 里明确"如果实际内容与大纲描述有出入，以实际内容为准"——大纲只在当前要生成的这一段本身没有内容时才是唯一依据（`sec_outline`），对已经写出来的相邻段落，真实内容才是权威衔接依据。
+
+**踩过的坑（生成内容对大纲严重压缩/信息丢失，不是"生成后要不要检查大纲"能解决的问题）**：早期一度以为"生成后自动跑大纲一致性检查、需要时提议调整"就够了，但真正的问题在生成本身——细纲写得越详细（比如一段列了十几条分层要点），越容易被模型压缩成几句空洞概括，因为：① 字数目标之前不管细纲写多详细都固定给 2000 字（`section.word_count_target` 未设置、`task.word_count` 也未设置时的兜底值），2000 字装不下十几个要点的展开；② prompt 里从没明确要求"大纲每个要点都要实质展开、不能整条省略压缩"，也没说字数目标只是下限；③ 参考资料片段直接堆进 prompt，没有要求实质引用其具体内容。修复（`generate_section_content`/`generate_content` 两处 sectional 路径统一处理）：
+  - 字数下限按细纲本身的篇幅估算（`max(2000, len(sub_outline) * 4)`），而不是固定 2000——细纲越详细，下限越高
+  - 新增 `outline_fidelity_note`：明确要求逐条实质展开、不得压缩省略、字数是下限不是上限、不能为了控制篇幅反过来删减大纲要点
+  - 新增 `rag_fidelity_note`（有 `rag_text` 时才加）：要求实质引用参考资料的具体内容/数据/细节，而不是仅供背景了解
+  - 这几处都是纯 prompt 层面的调整，不改变"用户可以对大纲做非死板的合理改写"这个前提——只是不允许严重偏离、信息丢失式的压缩
 
 **已确认段落是更高权重的风格参考**：紧邻的上一段如果 `status == 'confirmed'`，`context_hint` 的措辞会换成"已被作者确认定稿，代表本文目前被认可的文字表达/语气/行文风格，请先仔细阅读这段定稿内容"，比普通草稿的"衔接依据"权重更高（`prev_section` 变量记录了上一段本身，不只是它的正文）。此外，**不限于紧邻段落**：所有其它 `confirmed` 的段落（排除紧邻上一段，避免正文在 prompt 里重复出现）会各自截断到 1500 字拼成一个独立的"作者已确认定稿的其它章节内容"参考块，插在 `_style_block`（风格技能手册/`style_req`）后面——只作风格参考，不要求承接。这几处都只读取 `status`，不修改任何数据，纯粹是 prompt 拼装层面的调整。
 
