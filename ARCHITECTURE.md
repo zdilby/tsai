@@ -834,6 +834,8 @@ prompt 明确要求"优先只给本段建议，非必要不提整体建议"、"�
 
 **应用调整**（`POST .../sections/{section_id}/apply_outline_review`）：`retrofits`（顺带回填的其它段落）无论选哪个 scope 都会先应用，只改那些段落的 `sub_outline`、绝不碰它们的 `content`/`status`。`scope=section` 只更新当前段自己的 `sub_outline` 再调 `sync_task_derived_texts`；`scope=overall` 把模型给的完整新大纲丢给 `_parse_outline_sections` 解析后直接复用整套 `reconcile_writing_sections` 管线（十一.4.1）——不额外跳过它的 `>3` 高风险确认阈值，一次 AI 提议的整体重写不该比人工编辑更值得信任，若触发确认，前端复用同一个 `#modal-reconcile-confirm` 弹窗（`pendingOutlineReviewRetry` 和 `pendingReconcilePatch` 二选一，谁非空就是这次弹窗该重放谁）。整体大纲解析不出任何 `## ` 标题（模型输出格式跑偏）时直接 400，不调用 reconcile——避免把"清空所有段落"这种危险操作当成正常输入执行。
 
+- **踩过的坑（`scope=overall` 漏了 `touch_section_generated_at`，导致"刚生成的这段反被标成过期"）**：`scope=section` 分支应用调整后会调 `touch_section_generated_at(section_id, task_id)`（注释里明确写了原因），但 `scope=overall` 分支只调了 `reconcile_writing_sections`（内部会调 `sync_task_derived_texts` 把 `outline_updated_at`/`toc_updated_at` 打成 `NOW()`）就直接返回，漏了这一步。后果：这次整体大纲重写明明是因为当前这段刚生成/编辑/确认的内容才触发的，`isSectionStale()` 却会把它判成"大纲改了、这段过期了"——对自己触发的变更倒打一耙。修复：`scope=overall` 分支在 `reconcile_writing_sections` 成功后也补一次 `touch_section_generated_at(section_id, task_id)`，只补触发这次重写的当前段，其它被这次重写改了 `sub_outline` 的段落该标"过期"继续标（提醒用户"计划变了，回头看看"是正确信号，不受这次修复影响）。
+
 **AI 面板与"放大段落"联动**：分段视图下，AI 对话面板/质量评估面板作用于当前放大的段落（`expandedSectionId`），而非全文；没有段落处于放大状态时，对话面板发送前提示、评估面板直接跳过不请求。切回全文视图后两者自动恢复为全文目标（判断逻辑在调用时读取 `viewMode`，无需额外状态同步）。"更新内容"按钮（全文一次性重新生成）在分段视图下点击会提示先"合并为全文"，而不是静默按全文大纲重新生成、丢弃分段草稿。
 
 **前端**（`templates/writing.html`）：写作目录弹窗（AI 生成 + "双向生成"——大纲↔TOC 互相推导）；分段卡片视图，含状态徽章、生成/排版/确认/放大操作、大纲变更后的"⚠过期"标记（比较 `outline_updated_at`/`toc_updated_at` 时间戳）；分段/全文视图切换；合并结果的 toast 提示会附上被跳过的章节标题。

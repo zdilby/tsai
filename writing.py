@@ -1329,6 +1329,13 @@ async def apply_outline_review(
     result = await reconcile_writing_sections(task_id, headings, bodies, confirm=payload.confirm_reconcile)
     if result["needs_confirm"]:
         return {"success": False, "needs_confirm": True, "reconcile_preview": result}
+    # 和上面 scope=="section" 分支同一个坑：reconcile_writing_sections 内部会调
+    # sync_task_derived_texts，把 outline_updated_at/toc_updated_at 打成比这段
+    # last_generated_at 更晚的 NOW()。这次整体重写恰恰是因为这段刚生成/编辑/确认的
+    # 内容才触发的，它不可能相对自己"过时"——只补这一段，其它被这次整体重写改了
+    # sub_outline 的段落该标"过期"就继续标（那是提醒用户"计划变了，回头看看"，
+    # 是正确的信号，不受这次修复影响）。
+    await touch_section_generated_at(section_id, task_id)
     return {"success": True, "reconcile": result}
 
 
