@@ -91,9 +91,15 @@ async def process_file_and_insert(file_path: Path, session_id: str):
         # 上下文增强（本地操作，无 API 调用）
         enriched_chunks = enrich_chunks_with_context(text, file_path.name, raw_chunks)
 
-        # 批量 embedding
+        # 批量 embedding（带进度回调，让前端轮询能看到 processed_chunks 实时增长，
+        # 而不是一直显示 0/total 到最后一刻才跳变——之前排查大文件卡死时，这是
+        # 判断"是否还在正常跑"唯一的直接信号，之前只能靠翻服务器日志）
         logger.info("Embedding 开始: %s (%d chunks)", file_path.name, len(enriched_chunks))
-        embeddings = await get_embeddings_batch(embed_client, enriched_chunks)
+
+        async def _report_progress(done: int, total: int):
+            await update_file_status(session_id, file_path.name, 'processing', processed=done)
+
+        embeddings = await get_embeddings_batch(embed_client, enriched_chunks, on_progress=_report_progress)
         logger.info("Embedding 完成: %s", file_path.name)
 
         # 批量写入（单连接，单次 register_vector，executemany）

@@ -191,7 +191,7 @@ async def get_embedding(client, text: str):
 # 大文档往往要跑几百个顺序批次，长链路里偶发一次网络抖动的概率不低——之前只重试 429，
 # 一次瞬时的 "Server disconnected without sending a response." 就会直接中断整个文件的处理。
 async def get_embeddings_batch(client, texts: list, batch_size: int = 50, max_retries: int = 6,
-                                batch_timeout: float = 90.0) -> list:
+                                batch_timeout: float = 90.0, on_progress=None) -> list:
     batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
     all_embeddings = []
 
@@ -210,6 +210,8 @@ async def get_embeddings_batch(client, texts: list, batch_size: int = 50, max_re
                     timeout=batch_timeout,
                 )
                 all_embeddings.extend(e.values for e in resp.embeddings)
+                if on_progress is not None:
+                    await on_progress(len(all_embeddings), len(texts))
                 break
             except Exception as e:
                 is_rate_limit = '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e)
