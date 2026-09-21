@@ -663,7 +663,7 @@
             justify-content: space-between;
             margin-top: 4px;
         }
-        .section-wc-target { font-size: 11px; color: #bdbdbd; }
+        .section-wc-current { font-size: 11px; color: #bdbdbd; }
         .section-expand-toggle {
             font-size: 18px;
             color: #9e9e9e;
@@ -1454,13 +1454,18 @@
         updateViewToggle();
     }
 
+    // 去掉常见 Markdown 语法符号后统计纯文本字数（全文字数统计、分段卡片当前字数共用）。
+    function computeWordCount(text) {
+        const plain = (text || '').replace(/[#*`>\-_\[\]()!]/g, ' ').replace(/\s+/g, ' ').trim();
+        return plain ? plain.length : 0;
+    }
+
     function updateWordCount() {
         let text = currentContent;
         if (editorMode === 'edit') {
             text = document.getElementById('content-textarea').value;
         }
-        const plain = text.replace(/[#*`>\-_\[\]()!]/g, ' ').replace(/\s+/g, ' ').trim();
-        const count = plain ? plain.length : 0;
+        const count = computeWordCount(text);
         document.getElementById('word-count-display').textContent = `字数：${count}`;
     }
 
@@ -1641,11 +1646,8 @@
                        onclick="toggleSectionExpand('${sec.id}', event)"
                        title="${isExpanded ? '缩小' : '放大'}">${isExpanded ? 'fullscreen_exit' : 'fullscreen'}</i>`
                 : '';
-            const wcTargetHtml = sec.word_count_target > 0
-                ? `<span class="section-wc-target">目标字数：${sec.word_count_target}</span>`
-                : '<span></span>';
-            const footerHtml = (sec.word_count_target > 0 || hasContent)
-                ? `<div class="section-content-footer">${wcTargetHtml}${expandToggleHtml}</div>`
+            const footerHtml = hasContent
+                ? `<div class="section-content-footer"><span class="section-wc-current">当前字数：${computeWordCount(sec.content)}</span>${expandToggleHtml}</div>`
                 : '';
 
             const editWindowOpen = (!!sectionDraftEdit && sectionDraftEdit.sectionId === sec.id)
