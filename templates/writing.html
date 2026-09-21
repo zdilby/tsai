@@ -1227,6 +1227,26 @@
         return result;
     }
 
+    // 弹窗内"确定"即保存（style_req/content_req/outline/reference_files 统一走这里，
+    // 和写作目录 btn-save-toc 保持一致的交互，不再是"确定"只暂存本地、还要再点一次
+    // 外层"保存设置"才真正持久化）。这几个字段本身不会触发 reconcile（只有 outline/
+    // toc 会），成功后要自己把 savedSettings 对应字段同步一下，否则脏检查会一直判定
+    // 为"有改动"；outline 是例外，reconcile 成功时 applyReconcileResultToSettings 已经
+    // 把 outline/toc 一起同步过了，这里就不用再覆盖。
+    // 返回 true 表示已成功保存；false 表示触发了 needs_confirm（确认弹窗已经打开，
+    // 调用方不需要再额外处理）或没有 TASK_ID（新任务还没创建，纯本地兜底）。
+    async function saveSettingField(field, value, modalId) {
+        localSettings[field] = value;
+        updateSettingButtonLabels();
+        M.Modal.getInstance(document.getElementById(modalId)).close();
+        if (!TASK_ID) { checkDirty(); return false; }
+        const result = await finishSettingsPatch({[field]: value});
+        if (!result.ok) return false;
+        if (!result.data.reconcile) savedSettings[field] = Array.isArray(value) ? value.slice() : value;
+        checkDirty();
+        return true;
+    }
+
     // 段落生成完成后，若后端判定大纲该跟进调整（见 writing.py:_check_outline_drift），
     // SSE 流末尾会带一个 outline_review 信号帧（generateSection() 里已经识别出来），
     // 这里弹窗展示建议、等用户三选一。
@@ -2576,11 +2596,14 @@
             document.getElementById('style-req-textarea').value = localSettings.style_req;
             M.Modal.getInstance(document.getElementById('modal-style-req')).open();
         });
-        document.getElementById('btn-save-style').addEventListener('click', function () {
-            localSettings.style_req = document.getElementById('style-req-textarea').value.trim();
-            updateSettingButtonLabels();
-            checkDirty();
-            M.Modal.getInstance(document.getElementById('modal-style-req')).close();
+        document.getElementById('btn-save-style').addEventListener('click', async function () {
+            const value = document.getElementById('style-req-textarea').value.trim();
+            try {
+                const ok = await saveSettingField('style_req', value, 'modal-style-req');
+                if (ok) M.toast({html: '写作风格已保存', classes: 'indigo'});
+            } catch (e) {
+                M.toast({html: '保存失败：' + e.message, classes: 'red'});
+            }
         });
         document.getElementById('style-file-btn').addEventListener('click', function() {
             document.getElementById('style-file-input').click();
@@ -2643,22 +2666,31 @@
             document.getElementById('content-req-textarea').value = localSettings.content_req;
             M.Modal.getInstance(document.getElementById('modal-content-req')).open();
         });
-        document.getElementById('btn-save-content-req').addEventListener('click', function () {
-            localSettings.content_req = document.getElementById('content-req-textarea').value.trim();
-            updateSettingButtonLabels();
-            checkDirty();
-            M.Modal.getInstance(document.getElementById('modal-content-req')).close();
+        document.getElementById('btn-save-content-req').addEventListener('click', async function () {
+            const value = document.getElementById('content-req-textarea').value.trim();
+            try {
+                const ok = await saveSettingField('content_req', value, 'modal-content-req');
+                if (ok) M.toast({html: '内容要求已保存', classes: 'indigo'});
+            } catch (e) {
+                M.toast({html: '保存失败：' + e.message, classes: 'red'});
+            }
         });
 
         document.getElementById('btn-outline').addEventListener('click', function () {
             document.getElementById('outline-textarea').value = localSettings.outline;
             M.Modal.getInstance(document.getElementById('modal-outline')).open();
         });
-        document.getElementById('btn-save-outline').addEventListener('click', function () {
-            localSettings.outline = document.getElementById('outline-textarea').value.trim();
-            updateSettingButtonLabels();
-            checkDirty();
-            M.Modal.getInstance(document.getElementById('modal-outline')).close();
+        document.getElementById('btn-save-outline').addEventListener('click', async function () {
+            const value = document.getElementById('outline-textarea').value.trim();
+            try {
+                const ok = await saveSettingField('outline', value, 'modal-outline');
+                if (ok) {
+                    M.toast({html: `大纲已保存，共 ${sections.length} 个分段`, classes: 'indigo'});
+                    if (sections.length > 0) showSectionsView();
+                }
+            } catch (e) {
+                M.toast({html: '保存失败：' + e.message, classes: 'red'});
+            }
         });
         document.getElementById('btn-gen-outline-from-toc').addEventListener('click', async function () {
             if (!TASK_ID) { M.toast({html: '请先选择写作任务'}); return; }
@@ -2765,14 +2797,16 @@
             M.Modal.getInstance(document.getElementById('modal-references')).open();
             await loadReferenceFiles();
         });
-        document.getElementById('btn-save-references').addEventListener('click', function () {
+        document.getElementById('btn-save-references').addEventListener('click', async function () {
             const checked = Array.from(
                 document.querySelectorAll('#references-file-list input[type=checkbox]:checked')
             ).map(cb => cb.value);
-            localSettings.reference_files = checked;
-            updateSettingButtonLabels();
-            checkDirty();
-            M.Modal.getInstance(document.getElementById('modal-references')).close();
+            try {
+                const ok = await saveSettingField('reference_files', checked, 'modal-references');
+                if (ok) M.toast({html: '参考资料已保存', classes: 'indigo'});
+            } catch (e) {
+                M.toast({html: '保存失败：' + e.message, classes: 'red'});
+            }
         });
 
         document.getElementById('btn-save-settings').addEventListener('click', async function () {
