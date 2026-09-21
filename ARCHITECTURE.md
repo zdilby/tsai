@@ -1,7 +1,7 @@
 # TSAI 项目架构文档
 
 > 本文档由 Claude Code 自动生成并维护，随代码变动同步更新。
-> 最后更新：2026-09-21
+> 最后更新：2026-09-22
 
 ---
 
@@ -120,7 +120,7 @@ tsai/
 | `POST` | `/writing/tasks/{task_id}/generate_content` | SSE 流式生成/优化写作内容（含 RAG 参考资料检索）；大纲 ≥2 章节且总字数=0 或 ≥3000 时自动切换为**逐章节生成**（`use_sectional`），每章独立调用并携带前文尾部 1200 字作衔接提示 |
 | `POST` | `/writing/tasks/{task_id}/chat` | 写作 AI 对话（全文级）；AI 用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` 包裹修改后全文 |
 | `GET` | `/writing/tasks/{task_id}/sections` | 获取任务的全部分段（`writing_sections`，按 `section_index` 排序） |
-| `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status）。只传 `content` 且没显式传 `heading` 时，若正文首行是 `## 新标题`，自动同步为该段新标题并重算任务的 outline/toc 派生文本（响应带 `heading_synced`），见十一.4.1 |
+| `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status）。只传 `content` 且没显式传 `heading` 时，若正文首行是 `## 新标题`，自动同步为该段新标题并重算任务的 outline/toc 派生文本（响应带 `heading_synced`），见十一.4.1。`status` 传 `confirmed`（即"确认"定稿）时，若别的段落已有内容，额外跑一次和"生成"完全同一套的大纲一致性检查，响应带 `outline_review`（无建议为 `null`），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落的**完整**正文作衔接，而不是摘要——内容可能被人工编辑过，衔接要看真实内容），完成后段落状态置为 `draft`；若任务里还有别的段落已有内容，额外跑一次大纲一致性检查，需要调整时在流末尾追加一个 `type:"outline_review"` 的信号帧（非文本分片），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/apply_outline_review` | 应用一致性检查提出的大纲调整建议（`scope: "section"｜"overall"`），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/format` | 单段 Markdown 排版（同 Codex→Gemini 回退策略） |
@@ -815,7 +815,9 @@ body (flex row, ≥993px)
 
 **生成时内容优先于大纲**：`generate_section_content`（`writing.py`）衔接上下文从"上一段结尾 800 字"改成上一段**完整**正文（`prev_full`，不截断），prompt 里明确"如果实际内容与大纲描述有出入，以实际内容为准"——大纲只在当前要生成的这一段本身没有内容时才是唯一依据（`sec_outline`），对已经写出来的相邻段落，真实内容才是权威衔接依据。
 
-**生成完成后的一次性一致性检查**（`_check_outline_drift`，紧邻 `generate_section_content` 之前）：仅当任务里还有别的段落已经有内容时才触发（第一段生成、没有可比对对象时跳过，省一次调用）。额外发起一次非流式 Gemini 调用：给模型看大纲全文 + 每个其它段落的当前状态（有内容的段落给**真实内容**、没内容的段落给它的 `sub_outline`）+ 刚生成的这段内容，要求按严格标签格式（沿用 `_READABILITY_PROMPT_TMPL` 一类的纯文本标签 + 正则提取的项目既有约定，不用 `response_mime_type=json`）判断大纲是否需要调整：
+**已确认段落是更高权重的风格参考**：紧邻的上一段如果 `status == 'confirmed'`，`context_hint` 的措辞会换成"已被作者确认定稿，代表本文目前被认可的文字表达/语气/行文风格，请先仔细阅读这段定稿内容"，比普通草稿的"衔接依据"权重更高（`prev_section` 变量记录了上一段本身，不只是它的正文）。此外，**不限于紧邻段落**：所有其它 `confirmed` 的段落（排除紧邻上一段，避免正文在 prompt 里重复出现）会各自截断到 1500 字拼成一个独立的"作者已确认定稿的其它章节内容"参考块，插在 `_style_block`（风格技能手册/`style_req`）后面——只作风格参考，不要求承接。这几处都只读取 `status`，不修改任何数据，纯粹是 prompt 拼装层面的调整。
+
+**生成完成后的一次性一致性检查**（`_check_outline_drift`）：仅当任务里还有别的段落已经有内容时才触发（第一段生成、没有可比对对象时跳过，省一次调用）。触发点有两处——紧邻 `generate_section_content` 之前（生成完成后），以及 `patch_section` 把 `status` 改成 `confirmed` 时（见下）；两处调的是同一个函数，行为完全一致。额外发起一次非流式 Gemini 调用：给模型看大纲全文 + 每个其它段落的当前状态（有内容的段落给**真实内容**、没内容的段落给它的 `sub_outline`）+ 刚生成的这段内容，要求按严格标签格式（沿用 `_READABILITY_PROMPT_TMPL` 一类的纯文本标签 + 正则提取的项目既有约定，不用 `response_mime_type=json`）判断大纲是否需要调整：
 ```
 需要调整：是/否
 本段大纲建议：<...或"无">

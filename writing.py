@@ -1173,10 +1173,11 @@ async def generate_section_content(
     # 人工编辑过，实际内容才是权威的衔接依据，摘要容易漏掉编辑后才加进去的关键信息。
     all_secs = await get_writing_sections(task_id)
     idx = section["section_index"]
-    prev_full = ""
+    prev_section = None
     for s in all_secs:
-        if s["section_index"] < idx and s.get("content"):
-            prev_full = s["content"]
+        if s["section_index"] < idx and (s.get("content") or "").strip():
+            prev_section = s
+    prev_full = (prev_section or {}).get("content", "")
 
     wc_target = section.get("word_count_target") or 0
     if wc_target == 0:
@@ -1186,10 +1187,44 @@ async def generate_section_content(
     heading = section["heading"]
     sub_outline = section.get("sub_outline") or ""
     sec_outline = (f"## {heading}\n{sub_outline}").strip() if sub_outline else f"## {heading}"
-    context_hint = (
-        f"\n上一段落的完整实际内容（务必据此衔接；如果它与上面\"完整大纲\"的描述有出入，"
-        f"以这段实际内容为准——大纲仅供参考，可能因为人工编辑没有同步更新）：\n{prev_full}"
-    ) if prev_full else ""
+    if prev_full and prev_section and prev_section.get("status") == "confirmed":
+        # 紧邻的上一段已经被作者确认定稿——不只是"衔接依据"，更代表作者认可的最终
+        # 文字风格，权重应该比一般的"上一段草稿"更高，明确提示模型先读一遍再动笔。
+        context_hint = (
+            f"\n上一段落《{prev_section['heading']}》已被作者确认定稿，代表本文目前被认可的"
+            f"文字表达、语气和行文风格——请先仔细阅读这段定稿内容，创作本章节时须与之保持"
+            f"风格统一、承接自然；如果它与上面\"完整大纲\"的描述有出入，以这段定稿内容为准："
+            f"\n{prev_full}"
+        )
+    elif prev_full:
+        context_hint = (
+            f"\n上一段落的完整实际内容（务必据此衔接；如果它与上面\"完整大纲\"的描述有出入，"
+            f"以这段实际内容为准——大纲仅供参考，可能因为人工编辑没有同步更新）：\n{prev_full}"
+        )
+    else:
+        context_hint = ""
+
+    # 其它已确认定稿的章节（不含上面已经完整给出的紧邻上一段，避免同一段内容重复占用
+    # prompt）——定稿内容代表作者认可的最终文字表达/呈现方式，即便不是紧邻章节，也该
+    # 作为风格参考，而不只是最近一段草稿的衔接。每段截断到 1500 字：这里要的是"文风"，
+    # 不需要通篇原文，避免章节数一多把 prompt 撑得过大。
+    other_confirmed = [
+        s for s in all_secs
+        if s["id"] != section_id
+        and (not prev_section or s["id"] != prev_section["id"])
+        and s.get("status") == "confirmed"
+        and (s.get("content") or "").strip()
+    ]
+    confirmed_style_hint = ""
+    if other_confirmed:
+        ref_block = "\n\n".join(
+            f"## {s['heading']}\n{s['content'][:1500]}" for s in other_confirmed
+        )
+        confirmed_style_hint = (
+            f"\n以下是作者已确认定稿的其它章节内容，代表本文认可的文字表达、用词习惯、"
+            f"句式风格——创作本章节时须与之保持风格统一（不要求承接内容，只参考文风）："
+            f"\n{ref_block}\n"
+        )
 
     _skills = (task.get("style_skills") or "").strip()
     _style_block = (
@@ -1199,7 +1234,7 @@ async def generate_section_content(
     )
     prompt = (
         f"请为以下写作任务创作指定章节内容（Markdown，直接输出含 ## 章节标题的完整章节）：\n"
-        f"文章标题：{task['title']}{_style_block}内容要求：{task['content_req']}\n"
+        f"文章标题：{task['title']}{_style_block}{confirmed_style_hint}内容要求：{task['content_req']}\n"
         f"完整大纲：\n{task.get('outline', '')}\n参考资料：\n{rag_text}\n"
         f"本章节大纲：\n{sec_outline}\n本章节字数：约{wc_target}字"
         f"{context_hint}\n直接输出本章节完整内容，不加任何额外说明。"
