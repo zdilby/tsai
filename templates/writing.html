@@ -2163,7 +2163,9 @@
             if (!resp.ok) throw new Error(await resp.text());
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
-            let buffer = '', fullContent = '', finished = false, outlineReview = null;
+            // 生成不再跑大纲一致性检查（见 writing.py:generate_section_content 的注释）——
+            // 这里的 SSE 帧只有正文分片，不用再按 type 区分信号帧。
+            let buffer = '', fullContent = '', finished = false;
             while (!finished) {
                 const {done, value} = await reader.read();
                 if (done) break;
@@ -2174,22 +2176,13 @@
                     if (line.startsWith('data: ')) {
                         const raw = line.slice(6);
                         if (raw === '[DONE]') { finished = true; break; }
-                        const decoded = decodeSseData(raw);
-                        // 正文分片是字符串；大纲一致性检查的信号帧是一个对象
-                        // （见 writing.py:generate_section_content 的 outline_review 帧），
-                        // 两者共用同一条 SSE 通道，靠类型区分，不占用正文字数统计。
-                        if (decoded && typeof decoded === 'object' && decoded.type === 'outline_review') {
-                            outlineReview = decoded;
-                            continue;
-                        }
-                        fullContent += decoded;
+                        fullContent += decodeSseData(raw);
                         if (preview) preview.innerHTML = `<span style="color:#9e9e9e;font-size:13px">生成中... ${fullContent.length} 字</span>`;
                     }
                 }
             }
             await loadSections(TASK_ID);
             M.toast({html: '段落已生成', classes: 'indigo'});
-            if (outlineReview) openOutlineReviewModal(outlineReview);
         } catch (e) {
             if (preview) preview.innerHTML = origHtml;
             M.toast({html: '生成失败：' + e.message, classes: 'red'});

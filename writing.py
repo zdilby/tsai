@@ -1067,12 +1067,17 @@ _OUTLINE_DRIFT_PROMPT_TMPL = """你是长文写作的大纲维护助手。下面
 async def _check_outline_drift(
     task: dict, all_secs: list[dict], current_section_id: str, current_heading: str, current_content: str,
 ) -> dict | None:
-    """段落生成完成后的一次性大纲一致性检查。
+    """段落定稿（点"确认"）时的一次性大纲一致性检查。
 
     结合每个章节的真实状态（有内容的用真实内容代表，没内容的用它当前的大纲片段代表），
     判断大纲是否需要调整来匹配已经写出/编辑过的实际内容。解析失败、模型判定不需要
-    调整、或调用异常，一律返回 None——这一步是可选的锦上添花，绝不能影响本次生成
-    已经成功保存的正文，调用方需要自己 try/except 包一层。
+    调整、或调用异常，一律返回 None——这一步是可选的锦上添花，绝不能影响"确认"这个
+    动作本身已经生效的事实，调用方需要自己 try/except 包一层。
+
+    只在 patch_section 把 status 改成 confirmed 时触发（见该函数），不在生成/排版时跑：
+    生成本该是"照着大纲写"，AI 刚吐出来、用户还没看过的内容不该反过来倒逼大纲跟着改，
+    容易出现"AI 把细纲压缩成几句话就提议大纲大改"这种大幅改动、本末倒置的情况——只有
+    用户明确点"确认"、对这段内容定过稿之后，才值得让 AI 判断是否要跟进调整大纲。
     """
     state_parts = []
     for s in all_secs:
@@ -1251,21 +1256,11 @@ async def generate_section_content(
         full_content = "".join(accumulated)
         if full_content:
             await update_writing_section(section_id, task_id, content=full_content, status="draft")
-            # 只有任务里已经有别的段落带着真实内容时，才值得检查大纲是不是该跟进——
-            # 第一次生成（其它段落都还是空的）没有可比对的对象，跳过省一次调用。
-            other_have_content = any(
-                s["id"] != section_id and (s.get("content") or "").strip() for s in all_secs
-            )
-            if other_have_content:
-                try:
-                    outline_review = await _check_outline_drift(
-                        task, all_secs, section_id, heading, full_content,
-                    )
-                except Exception as e:
-                    outline_review = None
-                    logger.warning("大纲一致性检查失败（不影响本次生成）：%s", e)
-                if outline_review:
-                    yield f"data: {json.dumps({'type': 'outline_review', **outline_review}, ensure_ascii=False)}\n\n"
+            # 大纲一致性检查不在这里跑——生成本该是"照着大纲写"，AI 刚吐出来、用户还
+            # 没看过的内容不该反过来倒逼大纲跟着改，容易出现"大幅改动、本末倒置"的
+            # 情况（AI 把细纲压缩成几句话就提议大纲大改，而实际上只是这次生成没写全）。
+            # 只在用户明确点"确认"、表示对这段内容定过稿之后，才值得让 AI 判断是否要
+            # 跟进调整大纲——见 patch_section。
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1282,7 +1277,7 @@ async def apply_outline_review(
     payload: ApplyOutlineReviewRequest,
     user: dict = Depends(require_write_access),
 ):
-    """应用 _check_outline_drift 提出的大纲调整建议（见 generate_section_content）。
+    """应用 _check_outline_drift 提出的大纲调整建议（检查本身由 patch_section 的确认动作触发）。
 
     回填其它段落（retrofits）只改它们的 sub_outline，绝不碰 content/status——那些
     段落的正文可能是人工编辑过的，内容永远以人工编辑为准，这里只是让大纲的描述

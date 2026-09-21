@@ -121,7 +121,7 @@ tsai/
 | `POST` | `/writing/tasks/{task_id}/chat` | 写作 AI 对话（全文级）；AI 用 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` 包裹修改后全文 |
 | `GET` | `/writing/tasks/{task_id}/sections` | 获取任务的全部分段（`writing_sections`，按 `section_index` 排序） |
 | `PATCH` | `/writing/tasks/{task_id}/sections/{section_id}` | 更新单个段落（heading/sub_outline/content/word_count_target/status）。只传 `content` 且没显式传 `heading` 时，若正文首行是 `## 新标题`，自动同步为该段新标题并重算任务的 outline/toc 派生文本（响应带 `heading_synced`），见十一.4.1。`status` 传 `confirmed`（即"确认"定稿）时，若别的段落已有内容，额外跑一次和"生成"完全同一套的大纲一致性检查，响应带 `outline_review`（无建议为 `null`），见十一.4.2 |
-| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落的**完整**正文作衔接，而不是摘要——内容可能被人工编辑过，衔接要看真实内容），完成后段落状态置为 `draft`；若任务里还有别的段落已有内容，额外跑一次大纲一致性检查，需要调整时在流末尾追加一个 `type:"outline_review"` 的信号帧（非文本分片），见十一.4.2 |
+| `POST` | `/writing/tasks/{task_id}/sections/{section_id}/generate` | SSE 流式生成单段内容（携带上一个已生成段落的**完整**正文作衔接，而不是摘要——内容可能被人工编辑过，衔接要看真实内容；已确认段落额外作为更高权重的风格参考），完成后段落状态置为 `draft`。**不跑大纲一致性检查**（该检查只在"确认"时跑，见十一.4.2）——生成/排版应该是"照着大纲写"，不该反过来擅自大改大纲 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/apply_outline_review` | 应用一致性检查提出的大纲调整建议（`scope: "section"｜"overall"`），见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/dismiss_stale` | 只关闭该段的"⚠ 过期"提示（`touch_section_generated_at`），不改正文/heading/status，不触发任何大纲同步或一致性检查，见十一.4.2 |
 | `POST` | `/writing/tasks/{task_id}/sections/{section_id}/format` | 单段 Markdown 排版（同 Codex→Gemini 回退策略） |
@@ -813,7 +813,7 @@ body (flex row, ≥993px)
   - **踩过的坑（改名把自己标成"过期"）**：`update_writing_section` 保存 content/heading 时会把这一段的 `last_generated_at` 打成 `NOW()`；紧接着 `sync_task_derived_texts` 又把 `outline_updated_at`/`toc_updated_at` 打成另一个 `NOW()`——两条先后执行的 SQL，第二个时间戳必然比第一个晚。前端 `isSectionStale()`（下方"过期"徽章）判断依据正是"大纲更新时间 > 本段最后生成时间"，于是刚改完标题的这一段会被自己这次编辑误标成"过期"。修复：`backend/db.py:touch_section_generated_at(section_id, task_id)` 在 `sync_task_derived_texts` 之后再把这一段的 `last_generated_at` 重新打一次 `NOW()`，确保它不早于刚刚一起更新的 outline/toc 时间戳。
 - 前端 `templates/writing.html`：`#modal-reconcile-confirm` 弹窗（仿 `#modal-del-writing` 样式）展示"识别为改名/将被归档/新增空段落"三组明细；`patchTaskWithReconcile()` 统一处理 PATCH 响应里的 `needs_confirm`（暂存 payload 到 `pendingReconcilePatch`、开弹窗），`btn-confirm-reconcile` 带上 `confirm_reconcile:true` 重新提交；`finishSettingsPatch()` 是 `btn-save-toc`/`btn-save-settings`/确认按钮共用的收尾（把 reconcile 返回的规范化 `outline`/`toc` 一起写回 `localSettings`/`savedSettings`——哪怕只编辑了其中一个，另一个也可能因顺序/改名同步而变化，必须两个都刷新，否则编辑框会显示过期内容、脏检查会误判）。
 
-#### 十一.4.2 段落生成时的大纲漂移检测
+#### 十一.4.2 段落确认时的大纲漂移检测
 
 **内容以人工编辑为准，大纲是从属描述**：`templates/writing.html` 段落卡片只在 `!hasContent` 时才显示 `sub_outline` 片段——已经有内容（生成过或被人工编辑替换过）的段落，实际内容可能早就偏离了当初的大纲，继续展示这份大纲容易误导，且不强制要求两者保持一致。
 
@@ -821,7 +821,7 @@ body (flex row, ≥993px)
 
 **已确认段落是更高权重的风格参考**：紧邻的上一段如果 `status == 'confirmed'`，`context_hint` 的措辞会换成"已被作者确认定稿，代表本文目前被认可的文字表达/语气/行文风格，请先仔细阅读这段定稿内容"，比普通草稿的"衔接依据"权重更高（`prev_section` 变量记录了上一段本身，不只是它的正文）。此外，**不限于紧邻段落**：所有其它 `confirmed` 的段落（排除紧邻上一段，避免正文在 prompt 里重复出现）会各自截断到 1500 字拼成一个独立的"作者已确认定稿的其它章节内容"参考块，插在 `_style_block`（风格技能手册/`style_req`）后面——只作风格参考，不要求承接。这几处都只读取 `status`，不修改任何数据，纯粹是 prompt 拼装层面的调整。
 
-**生成完成后的一次性一致性检查**（`_check_outline_drift`）：仅当任务里还有别的段落已经有内容时才触发（第一段生成、没有可比对对象时跳过，省一次调用）。触发点有两处——紧邻 `generate_section_content` 之前（生成完成后），以及 `patch_section` 把 `status` 改成 `confirmed` 时（见下）；两处调的是同一个函数，行为完全一致。额外发起一次非流式 Gemini 调用：给模型看大纲全文 + 每个其它段落的当前状态（有内容的段落给**真实内容**、没内容的段落给它的 `sub_outline`）+ 刚生成的这段内容，要求按严格标签格式（沿用 `_READABILITY_PROMPT_TMPL` 一类的纯文本标签 + 正则提取的项目既有约定，不用 `response_mime_type=json`）判断大纲是否需要调整：
+**只在"确认"时跑，不在生成/排版时跑**（`_check_outline_drift`，`patch_section` 把 `status` 改成 `confirmed` 时触发）：仅当任务里还有别的段落已经有内容时才触发（第一段确认、没有可比对对象时跳过，省一次调用）。**这条检查原来是挂在 `generate_section_content` 上的**（生成一完成就跑），后来发现这样会让"生成"变成一个会大幅改写大纲的操作——AI 刚吐出来、用户还没看过的内容，反过来倒逼大纲跟着改，实测出现过"AI 把详细的分条大纲压缩成几句话就提议大纲大改"这种本末倒置的情况。改为只在用户明确点"确认"（对内容定过稿）之后才跑，语义上更合理：生成/排版应该是"照着大纲写"，不该反过来擅自改大纲；只有内容被人工认可为定稿后，才值得让 AI 判断这份定稿内容是否让大纲需要跟进调整。额外发起一次非流式 Gemini 调用：给模型看大纲全文 + 每个其它段落的当前状态（有内容的段落给**真实内容**、没内容的段落给它的 `sub_outline`）+ 刚生成的这段内容，要求按严格标签格式（沿用 `_READABILITY_PROMPT_TMPL` 一类的纯文本标签 + 正则提取的项目既有约定，不用 `response_mime_type=json`）判断大纲是否需要调整：
 ```
 需要调整：是/否
 本段大纲建议：<...或"无">
@@ -832,7 +832,7 @@ body (flex row, ≥993px)
 ```
 prompt 明确要求"优先只给本段建议，非必要不提整体建议"、"回填标题必须逐字复制原文，不得意译"。解析失败/判定"否"/调用异常统统返回 `None`——这一步纯属锦上添花，绝不影响本次生成已经成功保存的正文，外层用 `try/except` 包一层。
 
-**信号帧不走文本分片通道**：判定需要调整时，在 SSE 流末尾、`[DONE]` 之前，多 yield 一帧 `data: {"type":"outline_review", ...}\n\n`——注意不经过 `_sse_chunk()`（那个是把字符串套一层 JSON 编码，用于正文分片），这里直接 `json.dumps` 一个**对象**。前端 `generateSection()` 手写的 SSE 读取循环里，`decodeSseData(raw)` 解出来是字符串就走原来的正文累加逻辑，是对象且 `type==='outline_review'` 就单独摘出来、不计入正文字数——两种帧共用同一条 SSE 通道，靠 JS 的 `typeof` 区分，不用引入具名的 SSE `event:` 字段（项目里所有手写读取循环都不解析它）。这个"用 `type` 字段区分帧类型"的约定和 `evaluate_content`/`gen_eval()` 的 `{'type':'stage',...}`/`{'type':'complete',...}` 是同一套。
+**建议结果走普通 JSON 字段，不是 SSE 信号帧**：`patch_section`（`PATCH .../sections/{section_id}`，普通请求/响应，不是流式端点）在 `status` 改成 `confirmed` 且判定需要调整时，把 `_check_outline_drift` 的返回值原样放进响应体的 `outline_review` 字段（无建议为 `null`）。前端 `confirmSection()` 拿到响应后，`newStatus === 'confirmed' && d.outline_review` 才调用 `openOutlineReviewModal(d.outline_review)` 弹窗——和生成流程的 SSE 信号帧（曾经的做法，已移除）不同，这里就是一次普通请求里的一个字段，不涉及流式通道内"文本分片 vs 信号帧"的类型区分。`openOutlineReviewModal`/`applyOutlineReview`/`apply_outline_review` 接口本身是共用的，触发来源变了但应用建议的路径不变。
 
 **应用调整**（`POST .../sections/{section_id}/apply_outline_review`）：`retrofits`（顺带回填的其它段落）无论选哪个 scope 都会先应用，只改那些段落的 `sub_outline`、绝不碰它们的 `content`/`status`。`scope=section` 只更新当前段自己的 `sub_outline` 再调 `sync_task_derived_texts`；`scope=overall` 把模型给的完整新大纲丢给 `_parse_outline_sections` 解析后直接复用整套 `reconcile_writing_sections` 管线（十一.4.1）——不额外跳过它的 `>3` 高风险确认阈值，一次 AI 提议的整体重写不该比人工编辑更值得信任，若触发确认，前端复用同一个 `#modal-reconcile-confirm` 弹窗（`pendingOutlineReviewRetry` 和 `pendingReconcilePatch` 二选一，谁非空就是这次弹窗该重放谁）。整体大纲解析不出任何 `## ` 标题（模型输出格式跑偏）时直接 400，不调用 reconcile——避免把"清空所有段落"这种危险操作当成正常输入执行。
 
