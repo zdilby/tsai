@@ -881,7 +881,35 @@ async def patch_section(
         # 上面这次保存更晚的 NOW()——不重新戳一下本段的 last_generated_at，前端
         # isSectionStale() 会把这次改名本身误判成"大纲改了、这段过期了"。
         await touch_section_generated_at(section_id, task_id)
-    return {"success": True, "heading_synced": heading_synced}
+
+    # 用户点"确认"（定稿）时，顺带跑一次和"生成"完全同一套的大纲一致性检查
+    # （_check_outline_drift）——手动编辑轮次越多，最终定稿内容离当初的 sub_outline
+    # 越可能跑偏，而这条路径此前完全没有机会触发这个检查（只有"生成"接口调用它）。
+    # 检查本身"少改动"是复用同一个 prompt 天然带来的（它已经要求"优先只给本段建议，
+    # 非必要不提整体建议"），应用时怎么改（只改这段 vs 整体重写）仍然交给前端弹窗
+    # 让用户选，和"生成"触发时一模一样，不在这里替用户做决定。
+    # 只读比对、失败不影响确认本身已经生效这一事实，所以照 generate 的先例整个包一层
+    # try/except；只有"确认"（非"取消确认"）才跑，且要求别的段落已经有内容可比对。
+    outline_review = None
+    if data.get("status") == "confirmed":
+        section_now = await get_writing_section(section_id, task_id)
+        final_content = (section_now or {}).get("content") or ""
+        if final_content.strip():
+            all_secs = await get_writing_sections(task_id)
+            other_have_content = any(
+                s["id"] != section_id and (s.get("content") or "").strip() for s in all_secs
+            )
+            task = await get_writing_task(task_id, user["id"]) if other_have_content else None
+            if task:
+                try:
+                    outline_review = await _check_outline_drift(
+                        task, all_secs, section_id, section_now["heading"], final_content,
+                    )
+                except Exception as e:
+                    outline_review = None
+                    logger.warning("确认段落时大纲一致性检查失败（不影响确认本身）：%s", e)
+
+    return {"success": True, "heading_synced": heading_synced, "outline_review": outline_review}
 
 
 _SECTION_IMAGE_CONTENT_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
