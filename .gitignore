@@ -17,3 +17,7 @@ static/maps/
 # 不是代码，不上 git；static/images/ 顶层的 favicon 等静态资源不受影响（只忽略其子目录）
 static/images/*/
 static/writing_images/
+
+# 猫剪影素材生成：只提交 final/ 成品，原图/中间产物不上 git
+scripts/cats_sprites/out/*
+!scripts/cats_sprites/out/final/

@@ -640,6 +640,9 @@ Cookie 安全属性：`httponly=True`，`secure=True`，`samesite="lax"`
 | `reset_stuck_processing.py` | 重置卡住的处理任务 |
 | `migrate.py` | 执行数据库迁移 |
 | `list_models.py` | 测试 Gemini 可用模型 |
+| `export_drawing_config.py` | 本地导出作图模块配置（Prompt 库 / Skill 包 / 风格）为 JSON，见十五.6 |
+| `import_drawing_config.py` | 把上述 JSON 一次性导入服务器库（幂等、保留原 UUID），见十五.6 |
+| `cats_sprites/generate_cats.py` | 一次性素材工具：复用 `backend/image_gen.py` 批量生成黑/白猫剪影并本地抠成 192×192 透明 PNG（纯色底出图 → 按亮度抠 alpha → 连通域去噪点）；输出在 `scripts/cats_sprites/out/`，不走作图路由、不写库 |
 
 ---
 
@@ -1675,6 +1678,25 @@ skill 全文是"必须遵循的规则"，`style_context` 是"在不违反 skill 
 **已验证**（全部端到端跑通，非仅编译层）：真实抓取 `https://github.com/LiamGvchi/gc-minimal-zine-poster`（`SKILL.md` + 5 个 `references/*.md`，共 31869 字符）走通"抓取预览→保存"；绑定后首次生成（纯文本，无输入图片），`full_prompt` 是正确融合 skill 规则的四段式 prompt（而非原始输入直接透传），实际生成出图片文件并落盘；对同一张图做绑定 skill 的编辑（走 `base_image_bytes` / `gtypes.Part.from_bytes` vision 输入分支），`full_prompt` 正确体现"调暖光线"的编辑意图且延续了 skill 的版式规则，同样实际生成出图片文件并落盘；PATCH `skill_package_id=""` 解绑后再次生成，`full_prompt` 变回未经 LLM 编译的直接拼接（验证了解绑回退）；浏览器里确认设置面板下拉框正确回显已绑定的包、管理弹窗正确展示已有包列表和新增表单。开发环境里 CODEX 图片生成中转偶发连接超时（`generate_image`/`edit_image` 请求本身没变化，属于中转网络层的间歇性问题，不是本功能代码缺陷），生产环境如遇到同类超时，属于已知的外部依赖不稳定性，不代表编排逻辑有误。
 
 Prompt 库与 `style.prompt` 合并为统一概念后（见十五.2），`_compile_with_skill_package` 的 `style_context` 单参数版本已重新端到端验证：绑定 2 条 Prompt 库条目 + 不绑 skill 包生成，`full_prompt` 正确等于两条 Prompt 内容拼接 + 用户输入；删除其中一条已勾选的 Prompt 后再次生成，被删条目正确从 `full_prompt` 中静默消失（不报错）；同一风格改绑 skill 包后生成，LLM 编译结果里正确体现了剩余那条 Prompt 的规则内容（例如"四角留白"被编译进最终 prompt 里"四角留空"的具体描述），三种场景均实际生成出图片文件。
+
+### 十五.6 配置迁移脚本（本地 → 服务器）
+
+**背景**：Prompt 库、Skill 包、风格都是在开发环境里手工攒出来的，新服务器库是空的，不想重复录入。两个脚本把这三类**配置**一次性搬过去（不含 `drawing_generations` 的图片和历史链）。
+
+```bash
+# 本地项目根目录
+python -m scripts.export_drawing_config -o drawing_config.json        # --user 可只导出某用户的风格
+# 传到服务器后，在服务器项目根目录（用与 gunicorn 相同的 venv）
+python -m scripts.import_drawing_config drawing_config.json --dry-run
+python -m scripts.import_drawing_config drawing_config.json --user <服务器用户名>
+```
+
+- **沿用原始 UUID 插入**：`drawing_styles.prompt_ids`（jsonb）和 `skill_package_id` 里的引用无需重新映射。
+- **幂等**：同 UUID 已存在则默认跳过；`--overwrite` 用文件内容覆盖已有记录（风格的覆盖带 `user_id` 条件，不会改到别人的风格）。输出按"新增 / 覆盖 / 跳过"统计。
+- **归属**：Prompt 库与 Skill 包是全体作图用户共享的，与用户无关；风格按用户隔离，默认按**同名用户**映射到服务器用户，找不到的风格被跳过并提示；`--user` 则统一归到指定用户（同时把它作为共享条目的 `created_by`，不指定则 `created_by` 为 NULL）。
+- 导入前会调用 `init_drawing_tables()`（幂等），服务器未建作图表也能直接导入。
+- 导出文件含 Skill 全文快照（单个可达 3 万字），不含密钥。
+- **验证范围**：本地库上用换了新 UUID 的测试数据验证过"新增"、"再次导入全部跳过"、风格引用能正确解析到 Prompt / 绑定 Skill，验证后测试数据已清理；`--overwrite` 与"用户不存在则跳过"两条路径未验证，上服务器前建议先 `--dry-run`。
 
 ---
 

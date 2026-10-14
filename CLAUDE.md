@@ -98,7 +98,7 @@ Feature modules (each is a substantial subsystem — see ARCHITECTURE.md for rou
 - `writing.py`, `drawing.py` + `backend/image_gen.py`, `map.py` — the three permission-gated modules described above
 - `agent_system/` — unrelated dev tool (gitignored), not part of the running app
 
-- `scripts/` — ops CLI utilities (invite codes, admin promotion, DB migration, stuck-file diagnosis/reset). Run with `python -m scripts.<name>` from the project root, using the **same venv the running gunicorn service uses** — production has been seen with a system Python too old for this codebase's `str | None` type hints, so a bare `python` on the box may not work.
+- `scripts/` — ops CLI utilities (invite codes, admin promotion, DB migration, stuck-file diagnosis/reset, `export_drawing_config`/`import_drawing_config` to copy the drawing module's Prompt library / Skill packages / styles from a dev DB to a fresh server DB — see ARCHITECTURE.md 十五.6). Run with `python -m scripts.<name>` from the project root, using the **same venv the running gunicorn service uses** — production has been seen with a system Python too old for this codebase's `str | None` type hints, so a bare `python` on the box may not work.
 
 ### Sessions
 
