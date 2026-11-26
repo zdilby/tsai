@@ -78,3 +78,10 @@ curl -sS -w '\nHTTP %{http_code}\n' \
 - Cookie 已是 `secure=True`，生产必须走 HTTPS，否则登录 Cookie 不下发。
 - 静态资源改动（`static/js/*`、`static/css/*`）上线后提醒用户强刷；或给静态资源加版本号/指纹。
 - 数据库新表：`backend/db.py` 的 `init_phase3_tables` / `init_writing_tables` / `init_drawing_tables` 幂等，启动自动跑；老库补字段跑 `python -m scripts.migrate`。
+
+## 6. 写作 AI 对话（2026-11-27）
+
+- 全文、段落、配图 Prompt 对话首选 `CODEX_*` 中转，`CODEX_MODEL=gpt-6.1-sol`，固定 `reasoning_effort=high`；回退读取 `GEMINI_TEXT_MODEL`（本地为 `gemini-3-flash-preview`）。部署需同步服务器环境配置，本地 `.env` 不提交 Git。
+- 首选超时预算 180 秒，回退 120 秒；两个阶段串行，代理建议保留现有 360 秒读超时，确认 gunicorn worker 超时足以覆盖长请求。部署/重启前仍需检查上传、出图后台任务。
+- `CODEX_MODEL` 是共享配置，写作排版及本地 CodingAgent 也会读取；高推理强度只用于 AI 对话。Embedding 模型、向量维度与 RAG 用户隔离不变，无需数据库迁移或重建向量。
+- 中转须支持 Chat Completions 的 `reasoning_effort`、`max_completion_tokens` 和 function tools；不兼容时自动回退 Gemini。首选联网通过现有 Google Custom Search 配置，Gemini 回退保留 grounding。

@@ -45,6 +45,7 @@ from backend.db import (
     get_latest_evaluation,
 )
 from backend.rag import get_embedding, query_rag_by_files
+from backend.writing_chat import generate_writing_chat_reply
 
 _FORMAT_SYSTEM = (
     "你是一个专业的中文文章 Markdown 排版助手。\n"
@@ -741,20 +742,8 @@ async def writing_task_chat(
         f"\n\n## 用户最新消息\n\n{message}"
     )
 
-    grounding_tool = gtypes.Tool(google_search=gtypes.GoogleSearch())
-    config = gtypes.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=[grounding_tool],
-        max_output_tokens=65536,
-    )
-
     try:
-        resp = await client.aio.models.generate_content(
-            model=settings.generation_model,
-            contents=prompt,
-            config=config,
-        )
-        answer = resp.text
+        answer = await generate_writing_chat_reply(prompt, system_instruction)
     except Exception as e:
         logger.exception("写作对话生成失败: %s", e)
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用")
@@ -1471,18 +1460,8 @@ async def section_chat(
         f"{content_block}{ref_files_block}{rag_block}{history_block}\n\n## 用户最新消息\n\n{message}"
     )
 
-    grounding_tool = gtypes.Tool(google_search=gtypes.GoogleSearch())
-    config = gtypes.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=[grounding_tool],
-        max_output_tokens=65536,
-    )
-
     try:
-        resp = await client.aio.models.generate_content(
-            model=settings.generation_model, contents=prompt, config=config,
-        )
-        answer = resp.text
+        answer = await generate_writing_chat_reply(prompt, system_instruction)
     except Exception as e:
         logger.exception("章节对话生成失败: %s", e)
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用")
@@ -1544,18 +1523,8 @@ async def section_image_chat(
         f"{content_block}{rag_block}{history_block}\n\n## 用户最新消息\n\n{message}"
     )
 
-    grounding_tool = gtypes.Tool(google_search=gtypes.GoogleSearch())
-    config = gtypes.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=[grounding_tool],
-        max_output_tokens=65536,
-    )
-
     try:
-        resp = await client.aio.models.generate_content(
-            model=settings.generation_model, contents=prompt, config=config,
-        )
-        answer = resp.text
+        answer = await generate_writing_chat_reply(prompt, system_instruction)
     except Exception as e:
         logger.exception("配图 Prompt 对话生成失败: %s", e)
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用")

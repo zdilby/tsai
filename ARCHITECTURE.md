@@ -753,10 +753,13 @@ body (flex row, ≥993px)
 - `enterEditMode()` / `exitEditMode(newContent)` 管理状态切换
 
 **AI 对话面板**（`#ai-chat-panel`）：
+- **模型与回退（2026-11-27）**：全文、段落、配图 Prompt 三个对话入口统一调用 `backend/writing_chat.py:generate_writing_chat_reply()`。首选 `CODEX_API_KEY` / `CODEX_BASE_URL` 的 OpenAI 兼容 `/chat/completions`，模型读取 `CODEX_MODEL`（当前本地 `gpt-6.1-sol`），`reasoning_effort="high"`。接口异常、超时、空答复或截断答复自动回退 `GEMINI_TEXT_MODEL`（当前本地 `gemini-3-flash-preview`），保持相同 prompt 和确认规则；双失败返回原有 502。首选整个工具循环上限 180 秒，Gemini 回退上限 120 秒。
+- **RAG 与联网**：生成模型切换不改变 Embedding / pgvector 配置。各路由仍先用 `GEMINI_EMBED_MODEL` 生成查询向量，再通过 `query_rag_by_files(embedding, user_id, reference_files)` 按用户与文件过滤，组装参考片段、当前内容和对话历史后传给任一模型。首选模型可调用 `web_search` 函数，由服务端现有 Google Custom Search 执行（最多 3 轮、每轮最多 5 次）；Gemini 回退仍使用 Google Search grounding。搜索无结果时告知无法核实。
+- **共享配置影响**：`CODEX_MODEL` 同时被 Markdown 排版和本地开发工具读取；修改它也会改变这些调用的模型。右下角对话的 `high` 推理参数只在新对话适配层发送，不给其他功能自动添加。
 - `chatSessionId` 指向当前写作任务的绑定 Session；发送消息期间显示闪烁的 `···`占位气泡（复用主对话模块 `.dots`/`@keyframes blink` 样式），收到回复/出错后移除
 - 对话目标随 `viewMode` 实时切换：全文视图 → `POST /tasks/{id}/chat`；分段视图且有段落处于"放大"状态 → `POST /tasks/{id}/sections/{expandedSectionId}/chat`；分段视图但无放大段落 → 提示用户先放大一个段落，不发送请求
 - **讨论优先，修改需二次确认**：`writing.py:_chat_system_instruction()`（全文/分段共用同一套规则文本）要求模型默认只回答/讨论（含写作任务之外的一般性问题，通过 Google Search grounding tool 回答），仅当检测到用户明确的修改意图时才在本轮反问确认（"是否需要我将……修改为……？"），必须在**下一轮**用户给出肯定答复（参考 `get_context()` 拉取的最近对话历史判断）后才允许输出 `[WRITING_UPDATE_START]...[WRITING_UPDATE_END]` / `[SECTION_UPDATE_START]...[SECTION_UPDATE_END]` 标记；前端检测到标记才抽取新内容 → 全文走 `exitEditMode()` + 自动保存 + 排版，分段走 `PATCH .../sections/{id}` + `loadSections()` 刷新
-- **对话历史持久化**：两个 chat 端点都会把用户提问和"剥离标记后的展示文本"（`_extract_chat_display()`，与前端渲染逻辑保持一致）存入 `messages` 表（`save_message`），刷新页面后 `loadChatHistory()` 从 `GET /messages/{session_id}` 拉取即可看到完整历史；全文与分段对话共享同一条任务 session 的历史，不做范围区分
+- **对话历史持久化**：三个 chat 端点都会把用户提问和"剥离标记后的展示文本"（`_extract_chat_display()`，与前端渲染逻辑保持一致）存入 `messages` 表（`save_message`），刷新页面后 `loadChatHistory()` 从 `GET /messages/{session_id}` 拉取即可看到完整历史；全文与分段对话共享同一条任务 session 的历史，不做范围区分
 
 ### 关键实现细节
 

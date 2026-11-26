@@ -62,6 +62,7 @@ class Settings(BaseModel):
     # 作图模块 — 复用写作模块已在用的 Codex/OpenAI 兼容中转端点
     codex_api_key: str | None = os.getenv("CODEX_API_KEY")
     codex_base_url: str | None = os.getenv("CODEX_BASE_URL")
+    codex_model: str = os.getenv("CODEX_MODEL", "gpt-6.1-sol").strip()
     codex_image_model: str = os.getenv("CODEX_IMAGE_MODEL", "gpt-image-1")
     # 图像生成/编辑的 read 超时（秒）。中转出图慢，默认给到 300s。
     codex_image_timeout: float = float(os.getenv("CODEX_IMAGE_TIMEOUT", "300"))
