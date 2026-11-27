@@ -337,6 +337,62 @@
             min-height: 267px;
             overflow: hidden;
         }
+        .writing-focus-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 30px;
+            width: 30px;
+            height: 30px;
+            margin: 4px 6px;
+            padding: 0;
+            box-sizing: border-box;
+            border: 1px solid #FFF;
+            border-radius: 12px;
+            background: #FFF;
+            color: #24211e;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 1px 2px rgba(0,0,0,0.10);
+            cursor: pointer;
+            transition: background-color 150ms ease, border-color 150ms ease, transform 150ms ease;
+        }
+        .writing-focus-toggle svg {
+            display: block;
+            width: 16px;
+            height: 16px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.6;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            pointer-events: none;
+        }
+        .writing-focus-toggle[hidden] { display: none !important; }
+        .writing-focus-toggle:focus { background: #FFF; }
+        .writing-focus-toggle:hover { background: #f3f1ed; border-color: #e4dfd8; }
+        .writing-focus-toggle:active { transform: scale(0.95); background: #e8e3dc; border-color: #d4cdc3; }
+        .writing-focus-toggle:focus-visible { outline: 2px solid #8b8379; outline-offset: 3px; }
+        @media (prefers-reduced-motion: reduce) {
+            .writing-focus-toggle { transition: none; }
+            .writing-focus-toggle:active { transform: none; }
+        }
+        #btn-exit-writing-focus {
+            display: none;
+            position: fixed;
+            top: 14px;
+            left: 12px;
+            margin: 0;
+            z-index: 100;
+        }
+        @media only screen and (min-width: 993px) {
+            body.writing-focus #writing-sidebar { display: none; }
+            body.writing-focus .writing-layout {
+                /* Keep the original and draft columns at their pre-toggle widths. */
+                grid-template-columns: min(var(--writing-focus-main-width), calc(100% - 300px)) minmax(0, 1fr);
+            }
+            body.writing-focus #settings-panel { display: none; }
+            body.writing-focus #ai-chat-panel { flex: 1; min-height: 0; }
+            body.writing-focus #btn-exit-writing-focus:not([hidden]) { display: inline-flex; }
+        }
         /* Right panel tabs */
         .right-panel-tabs {
             display: flex;
@@ -838,6 +894,9 @@
     </style>
 </head>
 <body>
+<button id="btn-exit-writing-focus" class="writing-focus-toggle" type="button" hidden
+        title="退出沉浸编写，恢复侧栏和设置" aria-label="退出沉浸编写，恢复侧栏和设置"
+        onclick="setWritingFocus(false)"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m6 3 5 5-5 5"/></svg></button>
 <div id="writing-busy-overlay">
     <div class="preloader-wrapper small active">
         <div class="spinner-layer spinner-blue-only">
@@ -969,6 +1028,10 @@
 
             <div id="ai-chat-panel">
                 <div class="right-panel-tabs">
+                    <button id="btn-enter-writing-focus" class="writing-focus-toggle" type="button" hidden
+                            title="沉浸编写：收起侧栏和设置" aria-label="进入段落沉浸编写"
+                            aria-controls="writing-sidebar writing-settings" aria-expanded="false"
+                            onclick="setWritingFocus(true)"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m10 3-5 5 5 5"/></svg></button>
                     <button class="right-tab-btn active" id="tab-btn-chat" onclick="switchRightTab('chat')">AI 对话</button>
                     <button class="right-tab-btn" id="tab-btn-eval" onclick="switchRightTab('eval')">评估</button>
                 </div>
@@ -1194,6 +1257,46 @@
     // always for the currently expanded section (editing requires the section to be expanded first).
     // draftContent only reaches the real writing_sections row via "替换原文" (replaceSectionWithDraft).
     let sectionDraftEdit = null;
+    let writingFocus = false;
+
+    function canUseWritingFocus() {
+        return window.matchMedia('(min-width: 993px)').matches
+            && viewMode === 'sections' && !!sectionDraftEdit && !sectionImageEdit
+            && sectionDraftEdit.sectionId === expandedSectionId
+            && sections.some(s => s.id === expandedSectionId && s.status !== 'confirmed');
+    }
+
+    function syncWritingFocusControls() {
+        const eligible = canUseWritingFocus();
+        if (writingFocus && !eligible) {
+            writingFocus = false;
+            document.body.classList.remove('writing-focus');
+            document.body.style.removeProperty('--writing-focus-main-width');
+            requestAnimationFrame(positionSectionEditPortal);
+        }
+        const enter = document.getElementById('btn-enter-writing-focus');
+        enter.hidden = !eligible || writingFocus;
+        enter.setAttribute('aria-expanded', String(writingFocus));
+        document.getElementById('btn-exit-writing-focus').hidden = !writingFocus;
+    }
+
+    function setWritingFocus(enabled) {
+        if (enabled && !canUseWritingFocus()) return;
+        if (enabled === writingFocus) return;
+        if (enabled) {
+            const mainWidth = document.getElementById('writing-main').getBoundingClientRect().width;
+            document.body.style.setProperty('--writing-focus-main-width', mainWidth + 'px');
+            switchRightTab('chat');
+        } else {
+            document.body.style.removeProperty('--writing-focus-main-width');
+        }
+        writingFocus = enabled;
+        document.body.classList.toggle('writing-focus', enabled);
+        syncWritingFocusControls();
+        // Reposition only: do not recreate the textarea or lose its selection/scroll/draft.
+        positionSectionEditPortal();
+        document.getElementById(enabled ? 'btn-exit-writing-focus' : 'btn-enter-writing-focus').focus();
+    }
     // { [sectionId]: [{marker_text, prompt, image_url}] } — fetched once when a section expands.
     let sectionImages = {};
     // { [sectionId]: Set<markerText> } — eye-icon "currently showing image" toggle, pure UI state,
@@ -1786,9 +1889,11 @@
         const listContainer = document.getElementById('sections-container');
         if (listContainer) listContainer.style.marginLeft = '';
         window.removeEventListener('resize', positionSectionEditPortal);
+        syncWritingFocusControls();
     }
 
     function renderSectionEditPortal() {
+        syncWritingFocusControls();
         const portal = document.getElementById('section-edit-portal');
         if (!sectionDraftEdit || viewMode !== 'sections') {
             // Hide (not close — keep sectionDraftEdit) when the sections view itself isn't
@@ -2313,6 +2418,7 @@
 
     function showArticleView() {
         viewMode = 'article';
+        syncWritingFocusControls();
         document.getElementById('sections-container').style.display = 'none';
         // A section's draft-edit window is sections-view-only — hide it (state stays intact
         // in sectionDraftEdit) rather than let it float over the full-article view.
@@ -3097,6 +3203,7 @@
     }
 
     document.addEventListener('DOMContentLoaded', function () {
+        window.addEventListener('resize', syncWritingFocusControls);
         M.AutoInit();
         M.Modal.init(document.querySelectorAll('#modal-style-req, #modal-content-req, #modal-outline, #modal-toc, #modal-references'));
         initSettingsListeners();
